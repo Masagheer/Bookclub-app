@@ -26,126 +26,97 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class HomePage extends StatefulWidget {
+class HomePage extends StatefulWidget{
   const HomePage({super.key});
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage>{
+  @override
+  Widget build(BuildContext content){
+    return Scaffold(
+      appBar: AppBar(title: const Text("Epub shit")),
+      floatingActionButton: FloatingActionButton(onPressed: uploadEpub, child: const Icon(Icons.add),),
+      body: Center(
+        child: books.isEmpty ? 
+        const Text("No books yet") : 
+        ListView.builder(
+          itemCount: books.length,
+          itemBuilder: (context, index) {
+            String path = books[index];
+            String fileName = path.split('/').last;
+            return ListTile(
+              title: Text(fileName),
+              trailing:IconButton(onPressed: () => deleteBook(index), icon: const Icon(Icons.delete)),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ReaderPage(path: path))),
+            );
+          }),
+      )
+    );
+  }
+
   List<String> books = [];
 
-  @override
-  void initState() {
+  void initiateState(){
     super.initState();
     loadBooksFromStorage();
   }
 
-  // 🔹 Load saved books
-  Future<void> loadBooksFromStorage() async {
+  Future<void> loadBooksFromStorage() async{
     final pref = await SharedPreferences.getInstance();
     books = pref.getStringList('books') ?? [];
     setState(() {});
   }
 
-  // 🔹 Pick + save epub
-  Future<void> pickEpubFile() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['epub'],
-    );
-
-    if (result != null) {
+  // upload and save epub
+  void uploadEpub() async{
+    // when you clicj on button, open file picker and let user select an epub file
+    FilePickerResult? result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['epub']);
+    
+    // result is the file that the user picked 
+    if (result != null){
+      // get the path that the user picked
       File file = File(result.files.single.path!);
-
-      final dir = await getApplicationDocumentsDirectory();
-
-      final savedFile = await file.copy(
-        '${dir.path}/${result.files.single.name}',
-      );
-
-      print("Saved to ${savedFile.path}");
-
-      await saveFilePath(savedFile.path);
-
+      // find a safe directory to save the file to
+      final dir = await getApplicationCacheDirectory();
+      // save the file to the safe directory
+      final savedFile = await file.copy('${dir.path}/${result.files.single.name}');
+      // make the saved file appear in the homepage.
+      await savedFilePath(savedFile.path);
       await loadBooksFromStorage();
     }
   }
 
-  // 🔹 Save path
-  Future<void> saveFilePath(String path) async {
+  // save path
+  Future<void> savedFilePath(String path) async{
     final pref = await SharedPreferences.getInstance();
-
     List<String> books = pref.getStringList('books') ?? [];
     books.add(path);
 
     await pref.setStringList('books', books);
   }
 
-  // 🔹 Delete book
-  Future<void> deleteBook(int index) async {
+  // delete book
+  void deleteBook(int index) async{
     final pref = await SharedPreferences.getInstance();
-
     books.removeAt(index);
-
     await pref.setStringList('books', books);
     setState(() {});
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("My Library"),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: pickEpubFile,
-        child: const Icon(Icons.add),
-      ),
-      body: books.isEmpty
-          ? const Center(child: Text("No books yet"))
-          : ListView.builder(
-              itemCount: books.length,
-              itemBuilder: (context, index) {
-                String path = books[index];
-                String fileName = path.split('/').last;
-
-                return ListTile(
-                  title: Text(fileName),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete),
-                    onPressed: () => deleteBook(index),
-                  ),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ReaderPage(path: path),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-    );
-  }
 }
 
-class ReaderPage extends StatelessWidget {
+class ReaderPage extends StatelessWidget{
   final String path;
-
+  
   const ReaderPage({super.key, required this.path});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context){
     return Scaffold(
-      appBar: AppBar(title: const Text("Reader")),
-      body: EpubView(
-        controller: EpubController(
-          document: EpubDocument.openFile(File(path)),
-        ),
-      ),
+      appBar: AppBar(title: Text("Reading")),
+      body: EpubView(controller: EpubController(document: EpubDocument.openFile(File(path)))),
     );
   }
 }
