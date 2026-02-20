@@ -154,43 +154,145 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  Future<String?> _loadBookContent(String epubPath) async {
-    try {
-      print('📖 Loading EPUB: $epubPath');
-      final bytes = await File(epubPath).readAsBytes();
-      final epub = await EpubReader.readBook(bytes);
+  // Future<String?> _loadBookContent(String epubPath) async {
+  //   try {
+  //     print('📖 Loading EPUB: $epubPath');
+  //     final bytes = await File(epubPath).readAsBytes();
+  //     final epub = await EpubReader.readBook(bytes);
       
-      print('✅ Title: ${epub.Title}');
-      print('✅ epubx Chapters: ${epub.Chapters?.length ?? 0}');
+  //     print('✅ Title: ${epub.Title}');
+  //     print('✅ epubx Chapters: ${epub.Chapters?.length ?? 0}');
       
-      // Check epubx first (don't break working books)
-      bool hasRealEpubxContent = false;
-      for (final chapter in epub.Chapters ?? []) {
-        if ((chapter.HtmlContent ?? '').length > 1500) {  // Lowered threshold
-          hasRealEpubxContent = true;
-          print('✅ epubx Chapter "${chapter.Title}" has ${chapter.HtmlContent!.length} chars - USING EPUBX');
-          break;
-        }
+  //     // Check epubx first (protect working books)
+  //     bool useEpubx = false;
+  //     for (final chapter in epub.Chapters ?? []) {
+  //       final contentLength = (chapter.HtmlContent ?? '').length;
+  //       if (contentLength > 1500) {
+  //         useEpubx = true;
+  //         print('✅ epubx Chapter "${chapter.Title}" (${contentLength} chars) - USING EPUBX');
+  //         break;
+  //       }
+  //     }
+      
+  //     if (useEpubx) {
+  //       print('🎉 Using epubx (working book)');
+  //       return _buildEpubxHtml(epub);
+  //     }
+      
+  //     // ZIP fallback - safer scanning
+  //     print('🔄 ZIP fallback...');
+  //     final archive = ZipDecoder().decodeBytes(bytes);
+  //     print('📦 ZIP files: ${archive.length}');
+      
+  //     List<ArchiveFile> contentFiles = [];
+  //     for (final file in archive) {
+  //       if (file.isFile) {
+  //         String fileName = file.name.toLowerCase();
+  //         if ((fileName.endsWith('.html') || fileName.endsWith('.xhtml')) && 
+  //             file.content.length > 500) {
+  //           try {
+  //             String preview = utf8.decode(file.content).substring(0, 150);
+  //             print('📄 ${file.name.padRight(40)} | ${file.content.length} chars');
+  //             contentFiles.add(file);
+  //           } catch (e) {
+  //             print('⚠️ Skip ${file.name}: $e');
+  //           }
+  //         }
+  //       }
+  //     }
+      
+  //     print('✅ Found ${contentFiles.length} content files');
+      
+  //     if (contentFiles.isEmpty) {
+  //       print('⚠️ No ZIP content - using epubx');
+  //       return _buildEpubxHtml(epub);
+  //     }
+      
+  //     // Build HTML (safer regex)
+  //     StringBuffer html = StringBuffer();
+  //     html.writeln('<!DOCTYPE html><html><head>');
+  //     html.writeln('<meta charset="UTF-8">');
+  //     html.writeln('<style>');
+  //     html.writeln('body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:white;color:#333;}');
+  //     html.writeln('h2{color:#2c5aa0;border-bottom:2px solid #eee;padding-bottom:10px;}');
+  //     html.writeln('.debug{background:#f0f8ff;padding:15px;border-left:4px solid #007acc;font-size:14px;margin:20px 0;}');
+  //     html.writeln('</style></head><body>');
+      
+  //     for (int i = 0; i < (contentFiles.length > 5 ? 5 : contentFiles.length); i++) {
+  //       final file = contentFiles[i];
+  //       String content = utf8.decode(file.content);
+        
+  //       html.writeln('<div style="margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;">');
+  //       html.writeln('<h2>📖 ${file.name.split('/').last}</h2>');
+        
+  //       html.writeln('<div class="debug">ZIP: ${content.length} chars | QueerList: ${content.contains("QueerList") ? "YES" : "NO"}</div><hr>');
+        
+  //       // Simple body extraction (no complex regex)
+  //       String mainContent = content;
+  //       int bodyStart = content.indexOf('<body');
+  //       if (bodyStart != -1) {
+  //         int bodyEnd = content.indexOf('</body>', bodyStart);
+  //         if (bodyEnd != -1) {
+  //           mainContent = content.substring(bodyStart + 6, bodyEnd);
+  //         }
+  //       }
+        
+  //       // Remove scripts/styles safely
+  //       mainContent = mainContent
+  //         .replaceAll(RegExp(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', multiLine: true), '')
+  //         .replaceAll(RegExp(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', multiLine: true), '');
+        
+  //       html.writeln(mainContent);
+  //       html.writeln('</div>');
+  //     }
+      
+  //     html.writeln('</body></html>');
+  //     print('✅ ZIP HTML: ${html.length} chars');
+  //     return html.toString();
+      
+  //   } catch (e) {
+  //     print('❌ ERROR: $e');
+  //     return '<h1 style="color:red;text-align:center;padding:50px;">Error loading book</h1>';
+  //   }
+  // }
+
+    // 🔥 MAIN LOADING FUNCTION
+    Future<String?> _loadBookContent(String epubPath) async {
+      try {
+        print('📖 Loading EPUB: $epubPath');
+        final bytes = await File(epubPath).readAsBytes();
+        final epub = await EpubReader.readBook(bytes);
+        
+        print('✅ Title: ${epub.Title}');
+        print('✅ epubx Chapters: ${epub.Chapters?.length ?? 0}');
+        
+        // FORCE ZIP - epubx HtmlContent is USELESS (XML headers only)
+        print('🔄 epubx too small → ZIP FORCED');
+        return await _zipDeepScan(epubPath, bytes, epub);
+        
+      } catch (e) {
+        print('❌ ERROR: $e');
+        return '<h1 style="color:red;text-align:center;padding:50px;">Error: $e</h1>';
       }
-      
-      if (hasRealEpubxContent) {
-        print('🎉 Using epubx (working book)');
-        return _buildEpubxHtml(epub);  // Keep working books unchanged
-      }
-      
-      // ZIP fallback - SHOW ALL HTML/XHTML files >500 chars
-      print('🔄 ZIP fallback - scanning ${bytes.length} bytes...');
+    }
+
+    // 🔥 ZIP CONTENT SCANNER
+    Future<String?> _zipDeepScan(String epubPath, List<int> bytes, EpubBook epub) async {
       final archive = ZipDecoder().decodeBytes(bytes);
-      print('📦 ZIP contains ${archive.length} files');
+      print('📦 ZIP: ${archive.length} files');
       
-      final contentFiles = <ArchiveFile>[];
+      List<MapEntry<String, ArchiveFile>> contentFiles = [];
+      
+      // Scan ALL HTML/XHTML files >500 chars
       for (final file in archive) {
         if (file.isFile) {
           final nameLower = file.name.toLowerCase();
-          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && file.content.length > 500) {
-            final preview = utf8.decode(file.content).substring(0, 150);
-            print('📄 ${file.name.padRight(50)} | ${file.content.length.toString().padLeft(6)} chars | "$preview"');
-            contentFiles.add(file);
+          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && 
+              file.content.length > 500) {
+            final preview = utf8.decode(file.content).substring(0, 200);
+            print('📄 ${file.name.padRight(50)} | ${file.content.length} chars');
+            print('   Preview: "$preview"');
+            contentFiles.add(MapEntry(file.name, file));
           }
         }
       }
@@ -198,62 +300,78 @@ class _ReaderPageState extends State<ReaderPage> {
       print('✅ Found ${contentFiles.length} content files');
       
       if (contentFiles.isEmpty) {
-        print('⚠️ No content files - using epubx metadata');
-        return _buildEpubxHtml(epub);
+        return '<h1 style="color:orange;text-align:center;">No content files >500 chars found</h1>';
       }
       
-      // Build HTML from ZIP content files
+      // Build COMPLETE HTML
       StringBuffer html = StringBuffer();
-      html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">'
-          '<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:white;color:#333;}'
-          'h2{color:#2c5aa0;border-bottom:2px solid #eee;padding-bottom:10px;}.debug{background:#f0f8ff;padding:15px;border-left:4px solid #007acc;font-size:14px;}</style></head><body>');
+      html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
+      html.writeln('<style>');
+      html.writeln('body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:#fdfdfd;color:#333;}');
+      html.writeln('h1{text-align:center;color:#2c5aa0;margin-bottom:40px;}');
+      html.writeln('h2{color:#2c5aa0;border-bottom:2px solid #eee;padding:20px 0 10px;margin-top:40px;}');
+      html.writeln('.debug{background:#e3f2fd;padding:15px;border-left:5px solid #2196f3;margin:20px 0;font-family:monospace;font-size:14px;border-radius:5px;box-shadow:0 2px 5px rgba(0,0,0,0.1);}');
+      html.writeln('.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}');
+      html.writeln('p{margin:15px 0;line-height:1.8;}');
+      html.writeln('</style></head><body>');
+      html.writeln('<h1>📖 ${epub.Title ?? "Book"}</h1>');
       
-      for (int i = 0; i < (contentFiles.length > 5 ? 5 : contentFiles.length); i++) {
-        final file = contentFiles[i];
-        final content = utf8.decode(file.content);
-        
-        html.writeln('<div style="margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;">');
-        html.writeln('<h2>📖 ${file.name.split('/').last}</h2>');
-        
-        // Debug info
-        html.writeln('<div class="debug">ZIP: ${content.length} chars | QueerList: ${content.contains("QueerList") ? "✅ YES!" : "❌ NO"}</div>');
-        
-        // Extract main content (try multiple methods)
-        String mainContent = content;
-        final bodyMatch = RegExp(r'<body[^>]*>([\\s\\S]*?)</body>', dotAll: true).firstMatch(content);
-        if (bodyMatch != null) mainContent = bodyMatch.group(1)!;
-        
-        // Strip scripts/styles
-        mainContent = mainContent
-            .replaceAll(RegExp(r'<script[^>]*>.*?</script>', dotAll: true), '')
-            .replaceAll(RegExp(r'<style[^>]*>.*?</style>', dotAll: true), '');
-        
-        html.writeln(mainContent);
-        html.writeln('</div>');
+      for (final entry in contentFiles) {
+        final file = entry.value;
+        final fileName = entry.key;
+        try {
+          String content = utf8.decode(file.content);
+          
+          html.writeln('<div class="chapter">');
+          html.writeln('<h2>📄 ${fileName.split('/').last}</h2>');
+          
+          // DEBUG BOX
+          html.writeln('<div class="debug">');
+          html.writeln('📏 <strong>File:</strong> $fileName');
+          html.writeln('📏 <strong>Size:</strong> ${content.length} chars');
+          html.writeln('🔍 <strong>Preview:</strong> ${content.length > 100 ? content.substring(0, 100) + "..." : content}');
+          html.writeln('✅ <strong>QueerList:</strong> ${content.contains("QueerList") ? "YES ✓" : "NO"}');
+          html.writeln('</div><hr>');
+          
+          // CLEAN CONTENT
+          String cleanContent = _stripXmlHeaders(content);
+          cleanContent = _removeStylesScripts(cleanContent);
+          
+          html.writeln(cleanContent);
+          html.writeln('</div>');
+          
+        } catch (e) {
+          print('⚠️ Error processing ${file.name}: $e');
+          html.writeln('<div class="chapter"><h2>⚠️ Error: ${file.name}</h2><p style="color:red;">$e</p></div>');
+        }
       }
       
       html.writeln('</body></html>');
-      print('✅ ZIP HTML generated: ${html.length} chars');
+      print('✅ Generated HTML: ${html.length} chars');
       return html.toString();
-    } catch (e) {
-      print('❌ ERROR: $e');
-      return '<h1 style="color:red;text-align:center;padding:50px;">Error: $e</h1>';
     }
-  }
 
-  String _buildEpubxHtml(EpubBook epub) {
-    StringBuffer html = StringBuffer('<!DOCTYPE html><html><head><meta charset="UTF-8">'
-        '<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;}'
-        '.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}h2{color:#2c5aa0;}</style></head><body>');
-    
-    html.writeln('<h1>📖 ${epub.Title}</h1>');
-    for (int i = 0; i < (epub.Chapters?.length ?? 0); i++) {
-      final chapter = epub.Chapters![i];
-      html.writeln('<div class="chapter"><h2>${chapter.Title}</h2><hr>${chapter.HtmlContent ?? '<p>No content</p>'}</div>');
+    // 🔥 XML HEADER STRIPPER
+    String _stripXmlHeaders(String html) {
+      // Remove XML declaration + DOCTYPE
+      html = html.replaceAll(RegExp(r'<\?xml[^>]*\?>', multiLine: true), '');
+      html = html.replaceAll(RegExp(r'<!DOCTYPE[^>]*>', multiLine: true), '');
+      
+      // Extract body content safely
+      final bodyMatch = RegExp(r'<body[^>]*>(.*?)</body>', multiLine: true, caseSensitive: false).firstMatch(html);
+      if (bodyMatch != null && bodyMatch.group(1) != null) {
+        html = bodyMatch.group(1)!;
+      }
+      
+      return html.trim();
     }
-    html.writeln('</body></html>');
-    return html.toString();
-  }
+
+    // 🔥 STYLE/SCRIPT REMOVER
+    String _removeStylesScripts(String html) {
+      html = html.replaceAll(RegExp(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', multiLine: true, caseSensitive: false), '');
+      html = html.replaceAll(RegExp(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', multiLine: true, caseSensitive: false), '');
+      return html;
+    }
 
 
   // Future<String?> _loadBookContent(String epubPath) async {
@@ -263,67 +381,131 @@ class _ReaderPageState extends State<ReaderPage> {
   //     final epub = await EpubReader.readBook(bytes);
       
   //     print('✅ Title: ${epub.Title}');
-  //     print('✅ Total Chapters: ${epub.Chapters?.length ?? 0}');
+  //     print('✅ epubx Chapters: ${epub.Chapters?.length ?? 0}');
       
-  //     // DEBUG: Check if epubx has real content
-  //     bool hasRealContent = false;
-  //     for (final chapter in epub.Chapters ?? []) {
-  //       if ((chapter.HtmlContent ?? '').length > 2000) {
-  //         hasRealContent = true;
-  //         break;
+  //     // DEBUG: Show ALL chapters + decide path
+  //     List<EpubChapter> realChapters = [];
+  //     for (int i = 0; i < (epub.Chapters?.length ?? 0); i++) {
+  //       final chapter = epub.Chapters![i];
+  //       final content = chapter.HtmlContent ?? '';
+  //       final preview = content.length > 100 ? content.substring(0, 100) : content;
+        
+  //       print('📄 Chapter ${i+1}: "${chapter.Title}" (${content.length} chars)');
+  //       print('   Preview: "$preview"');
+        
+  //       // NULL-SAFE story detection
+  //       final titleLower = (chapter.Title ?? '').toLowerCase();
+  //       final hasRealContent = content.length > 1000 &&
+  //           !titleLower.contains('contents') &&
+  //           !titleLower.contains('cover') &&
+  //           (content.contains('QueerList') || 
+  //           content.contains('<p>') || 
+  //           titleLower.contains('part'));
+        
+  //       if (hasRealContent) {
+  //         realChapters.add(chapter);
+  //         print('   ✅ STORY CHAPTER DETECTED!');
   //       }
   //     }
-  //     print('🔍 epubx real content detected: ${hasRealContent ? "YES" : "NO (ZIP fallback)"}');
       
-  //     // PRIORITY 1: Use epubx if it has real content (>2k chars/chapter)
-  //     if (hasRealContent) {
-  //       print('✅ Using epubx Chapters (working book)');
-  //       return _buildEpubxHtml(epub);
+  //     // Use epubx ONLY if we found real story chapters
+  //     if (realChapters.isNotEmpty) {
+  //       print('🎉 Using epubx (${realChapters.length} story chapters)');
+  //       return _buildEpubxHtml(realChapters);
   //     }
       
-  //     // PRIORITY 2: ZIP extraction fallback for broken books
-  //     print('🔄 Trying ZIP extraction...');
-  //     final zipResult = await _extractZipContent(archive: ZipDecoder().decodeBytes(bytes));
-  //     if (zipResult != null) {
-  //       print('✅ ZIP extraction SUCCESS');
-  //       return zipResult;
-  //     }
-      
-  //     // FAILSAFE: Show epubx metadata
-  //     print('⚠️ ZIP failed - showing epubx metadata');
-  //     return _buildEpubxHtml(epub);
+  //     print('🔄 No story chapters → ZIP fallback');
+  //     return await _zipFallback(epubPath, bytes);
   //   } catch (e) {
-  //     print('❌ TOTAL ERROR: $e');
-  //     return '<h1 style="color: red;">Error: $e</h1>';
+  //     print('❌ ERROR: $e');
+  //     return '<h1 style="color:red;">Error: $e</h1>';
   //   }
   // }
 
+  String _buildEpubxHtml(List<EpubChapter> chapters) {
+    StringBuffer html = StringBuffer();
+    html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
+    html.writeln('<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:white;color:#333;}.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}h2{text-align:center;color:#2c5aa0;}.debug{background:#f0f8ff;padding:15px;border-left:4px solid #007acc;margin:20px 0;}</style></head><body>');
+    
+    html.writeln('<h1 style="text-align:center;">📖 Book Chapters</h1>');
+    
+    for (final chapter in chapters) {
+      final content = chapter.HtmlContent ?? '';
+      html.writeln('<div class="chapter">');
+      html.writeln('<h2>${chapter.Title}</h2><hr>');
+      
+      // Debug box ON EVERY CHAPTER
+      html.writeln('<div class="debug">');
+      html.writeln('Chars: ${content.length} | Preview: "${content.length > 50 ? content.substring(0, 50) : content}"');
+      html.writeln('QueerList: ${content.contains("QueerList") ? "✅ YES" : "❌ NO"}');
+      html.writeln('</div>');
+      
+      html.writeln(content);
+      html.writeln('</div>');
+    }
+    
+    html.writeln('</body></html>');
+    return html.toString();
+  }
+
+  Future<String?> _zipFallback(String epubPath, List<int> bytes) async {
+    try {
+      final archive = ZipDecoder().decodeBytes(bytes);
+      print('📦 ZIP: ${archive.length} files');
+      
+      List<ArchiveFile> contentFiles = [];
+      for (final file in archive) {
+        if (file.isFile) {
+          final nameLower = file.name.toLowerCase();
+          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && 
+              file.content.length > 500) {
+            final preview = utf8.decode(file.content).substring(0, 100);
+            print('📄 ZIP: ${file.name} (${file.content.length} chars) | "$preview"');
+            contentFiles.add(file);
+          }
+        }
+      }
+      
+      if (contentFiles.isEmpty) {
+        print('❌ No ZIP content found');
+        return '<h1>No content files >500 chars</h1>';
+      }
+      
+      print('✅ Building ZIP HTML (${contentFiles.length} files)');
+      StringBuffer html = StringBuffer('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;}</style></head><body>');
+      
+      for (final file in contentFiles.take(5)) {
+        final content = utf8.decode(file.content);
+        html.writeln('<h2 style="color:#2c5aa0;">${file.name.split('/').last}</h2><hr>');
+        html.writeln('<div style="background:#f9f9f9;padding:15px;">${content.length} chars | QueerList: ${content.contains("QueerList") ? "✅ YES" : "NO"}</div>');
+        html.writeln(content.substring(0, 8000)); // First 8k chars
+        html.writeln('<hr style="margin:60px 0;">');
+      }
+      
+      html.writeln('</body></html>');
+      return html.toString();
+    } catch (e) {
+      print('❌ ZIP ERROR: $e');
+      return '<h1>ZIP Error: $e</h1>';
+    }
+  }
+
   // String _buildEpubxHtml(EpubBook epub) {
-  //   StringBuffer fullBook = StringBuffer();
-  //   fullBook.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
-  //   fullBook.writeln('<style>*{box-sizing:border-box;}body{font-family:Georgia,serif;font-size:18px;line-height:1.7;margin:0;padding:20px;background:white;color:#333;}.book{max-width:900px;margin:0 auto;}.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}h1,h2{text-align:center;color:#2c5aa0;}.debug{background:#f0f8ff;padding:15px;border-left:4px solid #007acc;margin:20px 0;}</style></head><body>');
-  //   fullBook.writeln('<div class="book"><h1>📖 ${epub.Title}</h1>');
+  //   StringBuffer html = StringBuffer();
+  //   html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
+  //   html.writeln('<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;}');
+  //   html.writeln('.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}h2{color:#2c5aa0;}</style></head><body>');
+    
+  //   html.writeln('<h1>📖 ${epub.Title ?? "Book"}</h1>');
     
   //   for (int i = 0; i < (epub.Chapters?.length ?? 0); i++) {
   //     final chapter = epub.Chapters![i];
-  //     final rawContent = chapter.HtmlContent ?? '';
-      
-  //     fullBook.writeln('<div class="chapter" id="chapter_$i">');
-  //     fullBook.writeln('<h2>${chapter.Title ?? "Chapter ${i+1}"}</h2><hr>');
-      
-  //     fullBook.writeln('<div class="debug"><strong>DEBUG:</strong><br>');
-  //     fullBook.writeln('Chars: ${rawContent.length}<br>');
-  //     fullBook.writeln('Preview: ${rawContent.length > 100 ? rawContent.substring(0, 100) : rawContent}<br>');
-  //     fullBook.writeln('</div>');
-      
-  //     if (rawContent.isNotEmpty) {
-  //       fullBook.writeln(rawContent);
-  //     }
-  //     fullBook.writeln('</div>');
+  //     final content = chapter.HtmlContent ?? '<p>No content</p>';
+  //     html.writeln('<div class="chapter"><h2>${chapter.Title ?? "Chapter $i"}</h2><hr>$content</div>');
   //   }
     
-  //   fullBook.writeln('</div></body></html>');
-  //   return fullBook.toString();
+  //   html.writeln('</body></html>');
+  //   return html.toString();
   // }
 
   Future<String?> _extractZipContent({required Archive archive}) async {
@@ -371,75 +553,6 @@ class _ReaderPageState extends State<ReaderPage> {
       return null;
     }
   }
-
-  // Future<String?> _loadBookContent(String epubPath) async {
-  //   try {
-  //     print('📖 Loading EPUB: $epubPath');
-  //     final bytes = await File(epubPath).readAsBytes();
-  //     final epub = await EpubReader.readBook(bytes);
-      
-  //     print('✅ Title: ${epub.Title}');
-  //     print('✅ Total Chapters: ${epub.Chapters?.length ?? 0}');
-      
-  //     StringBuffer fullBook = StringBuffer();
-  //     fullBook.writeln('<!DOCTYPE html><html><head>');
-  //     fullBook.writeln('<meta charset="UTF-8">');
-  //     fullBook.writeln('<style>');
-  //     fullBook.writeln('* { box-sizing: border-box; }');
-  //     fullBook.writeln('body { font-family: Georgia, serif; font-size: 18px; line-height: 1.7; margin: 0; padding: 20px; background: white; color: #333; }');
-  //     fullBook.writeln('.book { max-width: 900px; margin: 0 auto; }');
-  //     fullBook.writeln('.chapter { margin-bottom: 60px; padding-bottom: 40px; border-bottom: 2px solid #eee; page-break-after: always; }');
-  //     fullBook.writeln('h1, h2 { text-align: center; color: #2c5aa0; }');
-  //     fullBook.writeln('.debug { background: #f0f8ff; padding: 15px; border-left: 4px solid #007acc; margin: 20px 0; }');
-  //     fullBook.writeln('</style></head><body>');
-  //     fullBook.writeln('<div class="book">');
-  //     fullBook.writeln('<h1>📖 ${epub.Title}</h1>');
-      
-  //     if (epub.Chapters == null || epub.Chapters!.isEmpty) {
-  //       fullBook.writeln('<h2>No chapters found</h2>');
-  //     } else {
-  //       for (int i = 0; i < epub.Chapters!.length; i++) {
-  //         final chapter = epub.Chapters![i];
-  //         final rawContent = chapter.HtmlContent ?? '';
-          
-  //         print('Chapter ${i+1}: "${chapter.Title}" (${rawContent.length} chars)');
-          
-  //         fullBook.writeln('<div class="chapter" id="chapter_$i">');
-  //         fullBook.writeln('<h2>${chapter.Title ?? "Chapter ${i+1}"}</h2>');
-  //         fullBook.writeln('<hr style="margin: 30px 0;">');
-          
-  //         // DEBUG: Show RAW content + analysis
-  //         fullBook.writeln('<div class="debug">');
-  //         fullBook.writeln('<strong>DEBUG INFO:</strong><br>');
-  //         fullBook.writeln('Chars: ${rawContent.length}<br>');
-  //         fullBook.writeln('Starts with: "${rawContent.length > 100 ? rawContent.substring(0, 100) : rawContent}"<br>');
-  //         fullBook.writeln('Contains body text: ${rawContent.contains("<body") ? "YES" : "NO"}<br>');
-  //         fullBook.writeln('Contains QueerList: ${rawContent.contains("QueerList") ? "YES" : "NO"}');
-  //         fullBook.writeln('</div>');
-          
-  //         // ALWAYS show RAW HTML (no cleaning)
-  //         if (rawContent.isNotEmpty) {
-  //           fullBook.writeln(rawContent);
-  //         } else {
-  //           fullBook.writeln('<p style="color: #888;">EMPTY chapter content</p>');
-  //         }
-          
-  //         fullBook.writeln('</div>');
-  //       }
-  //     }
-      
-  //     fullBook.writeln('</div></body></html>');
-      
-  //     final htmlContent = fullBook.toString();
-  //     print('✅ Generated HTML: ${htmlContent.length} chars');
-  //     print('✅ First 500 chars: ${htmlContent.substring(0, htmlContent.length > 500 ? 500 : htmlContent.length)}');
-      
-  //     return htmlContent;
-  //   } catch (e) {
-  //     print('❌ EPUB ERROR: $e');
-  //     return '<h1 style="color: red; text-align: center;">Error loading book: $e</h1>';
-  //   }
-  // }
 
   String _cleanChapterHtml(String html) {
     String cleaned = html;
