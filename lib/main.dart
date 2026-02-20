@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:epub_view/epub_view.dart';
+// import 'package:epub_view/epub_view.dart';
+import 'package:flutter_epub_viewer/flutter_epub_viewer.dart';
 import 'dart:io';
 
 void main() {
@@ -50,7 +51,7 @@ class _HomePageState extends State<HomePage>{
             return ListTile(
               title: Text(fileName),
               trailing:IconButton(onPressed: () => deleteBook(index), icon: const Icon(Icons.delete)),
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ReaderPage(path: path))),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ReaderPage(path: path))),
             );
           }),
       )
@@ -107,16 +108,191 @@ class _HomePageState extends State<HomePage>{
   }
 }
 
-class ReaderPage extends StatelessWidget{
+class ReaderPage extends StatefulWidget{
   final String path;
   
   const ReaderPage({super.key, required this.path});
 
   @override
-  Widget build(BuildContext context){
+  State<ReaderPage> createState() => _ReaderPageState();
+  // Widget build(BuildContext context){
+  //   return Scaffold(
+  //     appBar: AppBar(title: Text("Reading")),
+  //     body: EpubView(controller: EpubController(document: EpubDocument.openFile(File(path)))),
+  //   );
+  // }
+}
+
+class _ReaderPageState extends State<ReaderPage> {
+  final EpubController _epubController = EpubController();
+  String? _lastSelectionCfi;
+  double _progress = 0.0; // 0–1
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Reading")),
-      body: EpubView(controller: EpubController(document: EpubDocument.openFile(File(path)))),
+      appBar: AppBar(
+        title: Text("${(_progress * 100).toStringAsFixed(1)}%"),
+      ),
+      body: SafeArea(
+        child: EpubViewer(
+          epubSource: EpubSource.fromFile(File(widget.path)),
+          epubController: _epubController,
+          displaySettings: EpubDisplaySettings(
+            flow: EpubFlow.paginated,
+            snap: true,
+            theme: EpubTheme.dark(), // or light(), or custom later
+          ),
+          onRelocated: (location) {
+            // location.progress is 0..1
+            setState(() => _progress = location.progress);
+          },
+          onTextSelected: (selection) {
+            // save selection CFI so we know *where* the text lives
+            _lastSelectionCfi = selection.selectionCfi;
+          },
+          selectionContextMenu: _buildContextMenu(),
+        ),
+      ),
+    );
+  }
+
+  ContextMenu _buildContextMenu() {
+    return ContextMenu(
+      menuItems: [
+        ContextMenuItem(
+          id: 1,
+          title: "Highlight",
+          action: () async {
+            if (_lastSelectionCfi != null) {
+              _epubController.addHighlight(cfi: _lastSelectionCfi!);
+            }
+          },
+        ),
+        ContextMenuItem(
+          id: 2,
+          title: "Comment",
+          action: () async {
+            if (_lastSelectionCfi == null) return;
+            final text = await _epubController.extractText(
+              startCfi: _lastSelectionCfi!,
+              endCfi: _lastSelectionCfi!,
+            );
+            _openCommentSheet(
+              context: context,
+              cfi: _lastSelectionCfi!,
+              textSnippet: (text ?? "").toString(),
+            );
+          },
+        ),
+      ],
+      settings: ContextMenuSettings(
+        hideDefaultSystemContextMenuItems: true,
+      ),
+    );
+  }
+
+  void _openCommentSheet({
+    required BuildContext context,
+    required String cfi,
+    required String textSnippet,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            left: 16,
+            right: 16,
+            top: 16,
+          ),
+          child: _CommentComposer(
+            cfi: cfi,
+            textSnippet: textSnippet,
+            onSubmitted: (commentText) async {
+              // TODO: save to Firestore/your backend here
+              // document example:
+              // {
+              //   bookId,
+              //   groupId,
+              //   cfi,
+              //   textSnippet,
+              //   body: commentText,
+              //   userId,
+              //   createdAt,
+              //   parentId: null (for root comment)
+              // }
+              Navigator.pop(ctx);
+            },
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CommentComposer extends StatefulWidget {
+  final String cfi;
+  final String textSnippet;
+  final ValueChanged<String> onSubmitted;
+
+  const _CommentComposer({
+    required this.cfi,
+    required this.textSnippet,
+    required this.onSubmitted,
+  });
+
+  @override
+  State<_CommentComposer> createState() => _CommentComposerState();
+}
+
+class _CommentComposerState extends State<_CommentComposer> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          "Selected text:",
+          style: Theme.of(context).textTheme.labelMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          widget.textSnippet,
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context)
+              .textTheme
+              .bodyMedium
+              ?.copyWith(fontStyle: FontStyle.italic),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _controller,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: "Write your comment…",
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerRight,
+          child: ElevatedButton(
+            onPressed: () {
+              if (_controller.text.trim().isEmpty) return;
+              widget.onSubmitted(_controller.text.trim());
+            },
+            child: const Text("Post comment"),
+          ),
+        ),
+        const SizedBox(height: 12),
+      ],
     );
   }
 }
