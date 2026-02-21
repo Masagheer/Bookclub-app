@@ -1,9 +1,10 @@
+import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_epub_viewer/flutter_epub_viewer.dart';
-import 'dart:io';
 
 void main() {
   runApp(const MyApp());
@@ -128,6 +129,7 @@ class _ReaderPageState extends State<ReaderPage> {
   String? _initialLocation;
   double _progress = 0.0;
   List<String> _savedHighlights = [];
+  List<Map<String, dynamic>> _savedComments = [];
   bool _isLoading = true;
 
   @override
@@ -140,11 +142,14 @@ class _ReaderPageState extends State<ReaderPage> {
     final prefs = await SharedPreferences.getInstance();
     final bookId = widget.path.hashCode.toString();
 
-    // Only load progress % 
     _progress = prefs.getDouble('lastProgress_$bookId') ?? 0.0;
-
-    // Load highlights
     _savedHighlights = prefs.getStringList('highlights_$bookId') ?? [];
+
+    // Load comments
+    final commentsJson = prefs.getStringList('comments_$bookId') ?? [];
+    _savedComments = commentsJson
+        .map((json) => jsonDecode(json) as Map<String, dynamic>)
+        .toList();
 
     _epubController = EpubController();
 
@@ -159,9 +164,7 @@ class _ReaderPageState extends State<ReaderPage> {
     final prefs = await SharedPreferences.getInstance();
     final bookId = widget.path.hashCode.toString();
     await prefs.setDouble('lastProgress_$bookId', _progress);
-    // NO CFI, NO href, NO location - just pure % progress
   }
-
 
   Future<void> _saveHighlight(String cfi) async {
     final prefs = await SharedPreferences.getInstance();
@@ -176,18 +179,61 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
+  Future<void> _saveComment({
+    required String cfi,
+    required String textSnippet,
+    required String comment,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookId = widget.path.hashCode.toString();
+
+    final newComment = {
+      'cfi': cfi,
+      'textSnippet': textSnippet,
+      'comment': comment,
+      'createdAt': DateTime.now().toIso8601String(),
+    };
+
+    _savedComments.add(newComment);
+
+    final commentsJson = _savedComments.map((c) => jsonEncode(c)).toList();
+    await prefs.setStringList('comments_$bookId', commentsJson);
+
+    // Also save as highlight so it appears highlighted
+    await _saveHighlight(cfi);
+
+    // Apply the highlight immediately
+    if (_epubController != null) {
+      _epubController!.addHighlight(cfi: cfi, color: Colors.orange);
+    }
+
+    setState(() {});
+  }
+
   Future<void> _applyHighlights() async {
-    if (_epubController == null || _savedHighlights.isEmpty) return;
-    
-    // Small delay to ensure rendering is complete
+    if (_epubController == null) return;
+
     await Future.delayed(const Duration(milliseconds: 300));
-    
+
+    // Get CFIs that have comments
+    final commentCfis = _savedComments.map((c) => c['cfi'] as String).toSet();
+
     for (final cfi in _savedHighlights) {
       try {
-        _epubController!.addHighlight(cfi: cfi, color: Colors.yellow);
+        // Orange for comments, yellow for regular highlights
+        final color = commentCfis.contains(cfi) ? Colors.orange : Colors.yellow;
+        _epubController!.addHighlight(cfi: cfi, color: color);
       } catch (e) {
         debugPrint('Failed to apply highlight at $cfi: $e');
       }
+    }
+  }
+
+  Map<String, dynamic>? _findCommentByCfi(String cfi) {
+    try {
+      return _savedComments.firstWhere((c) => c['cfi'] == cfi);
+    } catch (e) {
+      return null;
     }
   }
 
@@ -202,6 +248,12 @@ class _ReaderPageState extends State<ReaderPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text("${(_progress * 100).toStringAsFixed(1)}%"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.comment),
+            onPressed: () => _showAllComments(context),
+          ),
+        ],
       ),
       body: SafeArea(
         child: EpubViewer(
@@ -214,7 +266,7 @@ class _ReaderPageState extends State<ReaderPage> {
             theme: EpubTheme.light(),
           ),
           onChaptersLoaded: (chapters) {
-            _applyHighlights(); // Add this callback
+            _applyHighlights();
           },
           onRelocated: (location) {
             setState(() => _progress = location.progress);
@@ -250,23 +302,25 @@ class _ReaderPageState extends State<ReaderPage> {
           title: "Comment",
           action: () async {
             if (_lastSelectionCfi == null || _epubController == null) return;
+            
+            String textSnippet = "Selected text";
             try {
               final text = await _epubController!.extractText(
                 startCfi: _lastSelectionCfi!,
                 endCfi: _lastSelectionCfi!,
               );
-              _openCommentSheet(
-                context: context,
-                cfi: _lastSelectionCfi!,
-                textSnippet: (text ?? "").toString(),
-              );
+              if (text != null && text.toString().isNotEmpty) {
+                textSnippet = text.toString();
+              }
             } catch (e) {
-              _openCommentSheet(
-                context: context,
-                cfi: _lastSelectionCfi!,
-                textSnippet: "Selected text",
-              );
+              debugPrint('Could not extract text: $e');
             }
+            
+            _openCommentSheet(
+              context: context,
+              cfi: _lastSelectionCfi!,
+              textSnippet: textSnippet,
+            );
           },
         ),
       ],
@@ -280,6 +334,7 @@ class _ReaderPageState extends State<ReaderPage> {
     required BuildContext context,
     required String cfi,
     required String textSnippet,
+    Map<String, dynamic>? existingComment,
   }) {
     showModalBottomSheet(
       context: context,
@@ -295,8 +350,13 @@ class _ReaderPageState extends State<ReaderPage> {
           child: _CommentComposer(
             cfi: cfi,
             textSnippet: textSnippet,
-            onSubmitted: (commentText) {
-              debugPrint("Comment saved: $commentText at $cfi");
+            existingComment: existingComment?['comment'],
+            onSubmitted: (commentText) async {
+              await _saveComment(
+                cfi: cfi,
+                textSnippet: textSnippet,
+                comment: commentText,
+              );
               Navigator.pop(ctx);
             },
           ),
@@ -304,16 +364,112 @@ class _ReaderPageState extends State<ReaderPage> {
       },
     );
   }
+
+  void _showAllComments(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.3,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (_, scrollController) {
+            if (_savedComments.isEmpty) {
+              return const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Text(
+                    "No comments yet.\nSelect text and tap 'Comment' to add one.",
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            }
+
+            return ListView.builder(
+              controller: scrollController,
+              padding: const EdgeInsets.all(16),
+              itemCount: _savedComments.length,
+              itemBuilder: (_, index) {
+                final comment = _savedComments[index];
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: InkWell(
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      // Navigate to the comment location
+                      _epubController?.display(cfi: comment['cfi']);
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              comment['textSnippet'] ?? '',
+                              style: const TextStyle(
+                                fontStyle: FontStyle.italic,
+                                fontSize: 13,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            comment['comment'] ?? '',
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _formatDate(comment['createdAt']),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _formatDate(String? isoDate) {
+    if (isoDate == null) return '';
+    try {
+      final date = DateTime.parse(isoDate);
+      return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+    } catch (e) {
+      return '';
+    }
+  }
 }
 
 class _CommentComposer extends StatefulWidget {
   final String cfi;
   final String textSnippet;
+  final String? existingComment;
   final ValueChanged<String> onSubmitted;
 
   const _CommentComposer({
     required this.cfi,
     required this.textSnippet,
+    this.existingComment,
     required this.onSubmitted,
   });
 
@@ -323,6 +479,14 @@ class _CommentComposer extends StatefulWidget {
 
 class _CommentComposerState extends State<_CommentComposer> {
   final TextEditingController _controller = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.existingComment != null) {
+      _controller.text = widget.existingComment!;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -352,6 +516,7 @@ class _CommentComposerState extends State<_CommentComposer> {
         TextField(
           controller: _controller,
           maxLines: 3,
+          autofocus: true,
           decoration: const InputDecoration(
             hintText: "Write your comment…",
             border: OutlineInputBorder(),
@@ -365,12 +530,14 @@ class _CommentComposerState extends State<_CommentComposer> {
               if (_controller.text.trim().isEmpty) return;
               widget.onSubmitted(_controller.text.trim());
             },
-            child: const Text("Post comment"),
+            child: Text(widget.existingComment != null ? "Update" : "Post comment"),
           ),
         ),
         const SizedBox(height: 12),
       ],
     );
   }
+
+  
 }
 
