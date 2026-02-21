@@ -143,6 +143,7 @@ class _ReaderPageState extends State<ReaderPage> {
     final bookId = widget.path.hashCode.toString();
 
     _progress = prefs.getDouble('lastProgress_$bookId') ?? 0.0;
+    _initialLocation = prefs.getString('lastLocation_$bookId'); // Add this line
     _savedHighlights = prefs.getStringList('highlights_$bookId') ?? [];
 
     // Load comments
@@ -160,10 +161,13 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  Future<void> _saveProgress() async {
+  Future<void> _saveProgress(String? cfi) async {
     final prefs = await SharedPreferences.getInstance();
     final bookId = widget.path.hashCode.toString();
     await prefs.setDouble('lastProgress_$bookId', _progress);
+    if (cfi != null) {
+      await prefs.setString('lastLocation_$bookId', cfi);
+    }
   }
 
   Future<void> _saveHighlight(String cfi) async {
@@ -270,7 +274,7 @@ class _ReaderPageState extends State<ReaderPage> {
           },
           onRelocated: (location) {
             setState(() => _progress = location.progress);
-            _saveProgress();
+            _saveProgress(location.startCfi); // Pass the CFI here
           },
           onTextSelected: (selection) {
             _lastSelectionCfi = selection.selectionCfi;
