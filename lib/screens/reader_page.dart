@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// import 'package:epub_view/epub_view.dart';
 import 'package:flutter_epub_viewer/flutter_epub_viewer.dart';
 import 'dart:io';
 
@@ -26,7 +27,7 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class HomePage extends StatefulWidget {
+class HomePage extends StatefulWidget{
   const HomePage({super.key});
 
   @override
@@ -45,7 +46,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Deer Bookclub")),
+      appBar: AppBar(title: const Text("Epub shit")),
       floatingActionButton: FloatingActionButton(
         onPressed: uploadEpub,
         child: const Icon(Icons.add),
@@ -85,19 +86,19 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> savedFilePath(String path) async {
     final pref = await SharedPreferences.getInstance();
-    List<String> books = pref.getStringList('books') ?? [];
-    books.add(path);
-    await pref.setStringList('books', books);
+    final list = pref.getStringList('books') ?? [];
+    list.add(path);
+    await pref.setStringList('books', list);
   }
 
   Future<void> uploadEpub() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['epub'],
     );
 
     if (result != null && result.files.single.path != null) {
-      File file = File(result.files.single.path!);
+      final file = File(result.files.single.path!);
       final dir = await getApplicationCacheDirectory();
       final savedFile = await file.copy('${dir.path}/${result.files.single.name}');
       await savedFilePath(savedFile.path);
@@ -123,80 +124,48 @@ class ReaderPage extends StatefulWidget {
 }
 
 class _ReaderPageState extends State<ReaderPage> {
-  EpubController? _epubController;
+  late EpubController _epubController;
   String? _lastSelectionCfi;
-  String? _initialLocation;
   double _progress = 0.0;
-  List<String> _savedHighlights = [];
-  bool _isLoading = true;
+  String? _initialCfi; // last saved position
 
   @override
   void initState() {
     super.initState();
-    _loadSavedData();
+    _loadInitialState();
   }
 
-  Future<void> _loadSavedData() async {
+  Future<void> _loadInitialState() async {
     final prefs = await SharedPreferences.getInstance();
-    final bookId = widget.path.hashCode.toString();
 
-    // Only load progress % 
-    _progress = prefs.getDouble('lastProgress_$bookId') ?? 0.0;
-
-    // Load highlights
-    _savedHighlights = prefs.getStringList('highlights_$bookId') ?? [];
+    // restore last position (CFI) for this book
+    _initialCfi = prefs.getString('lastCfi_${widget.path}');
 
     _epubController = EpubController();
 
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-      });
-    }
+    setState(() {}); // trigger rebuild so EpubViewer has controller + initialCfi
   }
 
-  Future<void> _saveProgress() async {
+  Future<void> _saveLastCfi(String cfi) async {
     final prefs = await SharedPreferences.getInstance();
-    final bookId = widget.path.hashCode.toString();
-    await prefs.setDouble('lastProgress_$bookId', _progress);
-    // NO CFI, NO href, NO location - just pure % progress
+    await prefs.setString('lastCfi_${widget.path}', cfi);
   }
-
 
   Future<void> _saveHighlight(String cfi) async {
     final prefs = await SharedPreferences.getInstance();
-    final bookId = widget.path.hashCode.toString();
-    final highlights = prefs.getStringList('highlights_$bookId') ?? [];
-    if (!highlights.contains(cfi)) {
-      highlights.add(cfi);
-      await prefs.setStringList('highlights_$bookId', highlights);
-      setState(() {
-        _savedHighlights = highlights;
-      });
-    }
-  }
-
-  Future<void> _applyHighlights() async {
-    if (_epubController == null || _savedHighlights.isEmpty) return;
-    
-    // Small delay to ensure rendering is complete
-    await Future.delayed(const Duration(milliseconds: 300));
-    
-    for (final cfi in _savedHighlights) {
-      try {
-        _epubController!.addHighlight(cfi: cfi, color: Colors.yellow);
-      } catch (e) {
-        debugPrint('Failed to apply highlight at $cfi: $e');
-      }
+    final key = 'highlights_${widget.path}';
+    final list = prefs.getStringList(key) ?? [];
+    if (!list.contains(cfi)) {
+      list.add(cfi);
+      await prefs.setStringList(key, list);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+    // Until controller is ready, show loader
+    if (!mounted || _initialCfi == null && _epubController == null) {
+      // small guard; if needed, refine
     }
 
     return Scaffold(
@@ -204,28 +173,35 @@ class _ReaderPageState extends State<ReaderPage> {
         title: Text("${(_progress * 100).toStringAsFixed(1)}%"),
       ),
       body: SafeArea(
-        child: EpubViewer(
-          initialCfi: _initialLocation,
-          epubSource: EpubSource.fromFile(File(widget.path)),
-          epubController: _epubController!,
-          displaySettings: EpubDisplaySettings(
-            flow: EpubFlow.paginated,
-            snap: true,
-            theme: EpubTheme.light(),
-          ),
-          onChaptersLoaded: (chapters) {
-            _applyHighlights(); // Add this callback
-          },
-          onRelocated: (location) {
-            setState(() => _progress = location.progress);
-            _saveProgress();
-          },
-          onTextSelected: (selection) {
-            _lastSelectionCfi = selection.selectionCfi;
-          },
-          selectionContextMenu: _buildContextMenu(),
-        ),
+        child: _buildViewer(),
       ),
+    );
+  }
+
+  Widget _buildViewer() {
+    // If _epubController isn’t initialized yet, show loader
+    if (!(_epubController is EpubController)) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return EpubViewer(
+      initialCfi: _initialCfi,
+      epubSource: EpubSource.fromFile(File(widget.path)),
+      epubController: _epubController,
+      displaySettings: const EpubDisplaySettings(
+        flow: EpubFlow.paginated,
+        snap: true,
+      ),
+      onRelocated: (location) {
+        setState(() => _progress = location.progress);
+        if (location.cfi != null) {
+          _saveLastCfi(location.cfi!);
+        }
+      },
+      onTextSelected: (selection) {
+        _lastSelectionCfi = selection.selectionCfi;
+      },
+      selectionContextMenu: _buildContextMenu(),
     );
   }
 
@@ -236,11 +212,8 @@ class _ReaderPageState extends State<ReaderPage> {
           id: 1,
           title: "Highlight",
           action: () async {
-            if (_lastSelectionCfi != null && _epubController != null) {
-              _epubController!.addHighlight(
-                cfi: _lastSelectionCfi!,
-                color: Colors.yellow,
-              );
+            if (_lastSelectionCfi != null) {
+              _epubController.addHighlight(cfi: _lastSelectionCfi!);
               await _saveHighlight(_lastSelectionCfi!);
             }
           },
@@ -249,28 +222,20 @@ class _ReaderPageState extends State<ReaderPage> {
           id: 2,
           title: "Comment",
           action: () async {
-            if (_lastSelectionCfi == null || _epubController == null) return;
-            try {
-              final text = await _epubController!.extractText(
-                startCfi: _lastSelectionCfi!,
-                endCfi: _lastSelectionCfi!,
-              );
-              _openCommentSheet(
-                context: context,
-                cfi: _lastSelectionCfi!,
-                textSnippet: (text ?? "").toString(),
-              );
-            } catch (e) {
-              _openCommentSheet(
-                context: context,
-                cfi: _lastSelectionCfi!,
-                textSnippet: "Selected text",
-              );
-            }
+            if (_lastSelectionCfi == null) return;
+            final text = await _epubController.extractText(
+              startCfi: _lastSelectionCfi!,
+              endCfi: _lastSelectionCfi!,
+            );
+            _openCommentSheet(
+              context: context,
+              cfi: _lastSelectionCfi!,
+              textSnippet: (text ?? "").toString(),
+            );
           },
         ),
       ],
-      settings: ContextMenuSettings(
+      settings: const ContextMenuSettings(
         hideDefaultSystemContextMenuItems: true,
       ),
     );
@@ -295,8 +260,10 @@ class _ReaderPageState extends State<ReaderPage> {
           child: _CommentComposer(
             cfi: cfi,
             textSnippet: textSnippet,
-            onSubmitted: (commentText) {
-              debugPrint("Comment saved: $commentText at $cfi");
+            onSubmitted: (commentText) async {
+              // Later: send to backend with bookId + groupId + userId
+              // For now just print:
+              debugPrint("Comment on $cfi: $commentText");
               Navigator.pop(ctx);
             },
           ),
@@ -330,23 +297,19 @@ class _CommentComposerState extends State<_CommentComposer> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        Text(
           "Selected text:",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: Theme.of(context).textTheme.labelMedium,
         ),
         const SizedBox(height: 4),
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Colors.grey[100],
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            widget.textSnippet,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontStyle: FontStyle.italic),
-          ),
+        Text(
+          widget.textSnippet,
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context)
+              .textTheme
+              .bodyMedium
+              ?.copyWith(fontStyle: FontStyle.italic),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -373,4 +336,3 @@ class _CommentComposerState extends State<_CommentComposer> {
     );
   }
 }
-
