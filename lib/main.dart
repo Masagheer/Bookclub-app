@@ -131,6 +131,7 @@ class _ReaderPageState extends State<ReaderPage> {
   List<String> _savedHighlights = [];
   List<Map<String, dynamic>> _savedComments = [];
   bool _isLoading = true;
+  double _fontSize = 16.0; // Add this line
 
   @override
   void initState() {
@@ -145,6 +146,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _progress = prefs.getDouble('lastProgress_$bookId') ?? 0.0;
     _initialLocation = prefs.getString('lastLocation_$bookId'); // Add this line
     _savedHighlights = prefs.getStringList('highlights_$bookId') ?? [];
+    _fontSize = prefs.getDouble('fontSize_$bookId') ?? 16.0; // Add this line
 
     // Load comments
     final commentsJson = prefs.getStringList('comments_$bookId') ?? [];
@@ -159,6 +161,46 @@ class _ReaderPageState extends State<ReaderPage> {
         _isLoading = false;
       });
     }
+  }
+
+  void _increaseFontSize() {
+    setState(() {
+      if (_fontSize < 32.0) {
+        _fontSize += 2.0;
+        _saveFontSize();
+        _updateEpubFontSize();
+      }
+    });
+  }
+
+  void _decreaseFontSize() {
+    setState(() {
+      if (_fontSize > 10.0) {
+        _fontSize -= 2.0;
+        _saveFontSize();
+        _updateEpubFontSize();
+      }
+    });
+  }
+
+  void _resetFontSize() {
+    setState(() {
+      _fontSize = 16.0;
+      _saveFontSize();
+      // _updateEpubFontSize();
+    });
+  }
+
+  Future<void> _saveFontSize() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookId = widget.path.hashCode.toString();
+    await prefs.setDouble('fontSize_$bookId', _fontSize);
+  }
+
+  void _updateEpubFontSize() {
+    // _epubController?.evaluateJavascript(
+    //   "document.documentElement.style.fontSize = '${_fontSize}px';",
+    // );
   }
 
   Future<void> _saveProgress(String? cfi) async {
@@ -257,30 +299,60 @@ class _ReaderPageState extends State<ReaderPage> {
             icon: const Icon(Icons.comment),
             onPressed: () => _showAllComments(context),
           ),
+          IconButton(
+            icon: Icon(Icons.text_decrease),
+            onPressed: _decreaseFontSize,
+            tooltip: 'Decrease Font Size',
+          ),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8.0),
+            child: Center(
+              child: Text(
+                '${_fontSize.toStringAsFixed(0)}px',
+                style: TextStyle(fontSize: 14),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: Icon(Icons.text_increase),
+            onPressed: _increaseFontSize,
+            tooltip: 'Increase Font Size',
+          ),
+          IconButton(
+            icon: Icon(Icons.refresh),
+            onPressed: _resetFontSize,
+            tooltip: 'Reset Font Size',
+          ),
         ],
       ),
       body: SafeArea(
-        child: EpubViewer(
-          initialCfi: _initialLocation,
-          epubSource: EpubSource.fromFile(File(widget.path)),
-          epubController: _epubController!,
-          displaySettings: EpubDisplaySettings(
-            flow: EpubFlow.paginated,
-            snap: true,
-            theme: EpubTheme.light(),
-          ),
-          onChaptersLoaded: (chapters) {
-            _applyHighlights();
-          },
-          onRelocated: (location) {
-            setState(() => _progress = location.progress);
-            _saveProgress(location.startCfi); // Pass the CFI here
-          },
-          onTextSelected: (selection) {
-            _lastSelectionCfi = selection.selectionCfi;
-          },
-          selectionContextMenu: _buildContextMenu(),
-        ),
+        child: _isLoading
+            ? Center(child: CircularProgressIndicator())
+            : EpubViewer(
+              key: ValueKey(_fontSize), // 👈 ADD THIS
+              initialCfi: _initialLocation,
+              epubSource: EpubSource.fromFile(File(widget.path)),
+              epubController: _epubController!,
+              displaySettings: EpubDisplaySettings(
+                flow: EpubFlow.paginated,
+                snap: true,
+                theme: EpubTheme.light(),
+                fontSize: _fontSize.toInt(),
+              ),
+              onChaptersLoaded: (chapters) {
+                _applyHighlights();
+                _updateEpubFontSize(); // Apply font size when chapters load
+              },
+              onRelocated: (location) {
+                _initialLocation = location.startCfi; // 👈 store live position
+                setState(() => _progress = location.progress);
+                _saveProgress(location.startCfi);
+              },
+              onTextSelected: (selection) {
+                _lastSelectionCfi = selection.selectionCfi;
+              },
+              selectionContextMenu: _buildContextMenu(),
+            ),
       ),
     );
   }
@@ -540,8 +612,6 @@ class _CommentComposerState extends State<_CommentComposer> {
         const SizedBox(height: 12),
       ],
     );
-  }
-
-  
+  } 
 }
 
