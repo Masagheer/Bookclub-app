@@ -131,7 +131,10 @@ class _ReaderPageState extends State<ReaderPage> {
   List<String> _savedHighlights = [];
   List<Map<String, dynamic>> _savedComments = [];
   bool _isLoading = true;
-  double _fontSize = 16.0; // Add this line
+  double _fontSize = 16.0;
+  int _themeIndex = 0; // 0 = light, 1 = dark, 2 = sepia
+  int _viewerVersion = 0;
+  bool _showViewer = true;
 
   @override
   void initState() {
@@ -147,6 +150,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _initialLocation = prefs.getString('lastLocation_$bookId'); // Add this line
     _savedHighlights = prefs.getStringList('highlights_$bookId') ?? [];
     _fontSize = prefs.getDouble('fontSize_$bookId') ?? 16.0; // Add this line
+    _themeIndex = prefs.getInt('theme_$bookId') ?? 0;
 
     // Load comments
     final commentsJson = prefs.getStringList('comments_$bookId') ?? [];
@@ -283,6 +287,39 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
+  EpubTheme _getTheme() {
+    switch (_themeIndex) {
+      case 1:
+        return EpubTheme.dark();
+      default:
+        return EpubTheme.light();
+    }
+  }
+
+  Future<void> _switchTheme() async {
+    if (_epubController == null) return;
+
+    final currentCfi = _initialLocation;
+
+    setState(() {
+      _themeIndex = (_themeIndex + 1) % 2;
+      _showViewer = false; // remove viewer
+    });
+
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    setState(() {
+      _initialLocation = currentCfi;
+      _showViewer = true; // rebuild viewer
+    });
+  }
+
+  Future<void> _saveTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookId = widget.path.hashCode.toString();
+    await prefs.setInt('theme_$bookId', _themeIndex);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -319,16 +356,21 @@ class _ReaderPageState extends State<ReaderPage> {
             tooltip: 'Increase Font Size',
           ),
           IconButton(
-            icon: Icon(Icons.refresh),
-            onPressed: _resetFontSize,
-            tooltip: 'Reset Font Size',
+            icon: const Icon(Icons.palette),
+            onPressed: _switchTheme,
+            tooltip: "Switch Theme",
           ),
+          // IconButton(
+          //   icon: Icon(Icons.refresh),
+          //   onPressed: _resetFontSize,
+          //   tooltip: 'Reset Font Size',
+          // ),
         ],
       ),
       body: SafeArea(
         child: _isLoading
             ? Center(child: CircularProgressIndicator())
-            : EpubViewer(
+            : _showViewer ? EpubViewer(
               key: ValueKey(_fontSize), // 👈 ADD THIS
               initialCfi: _initialLocation,
               epubSource: EpubSource.fromFile(File(widget.path)),
@@ -336,7 +378,7 @@ class _ReaderPageState extends State<ReaderPage> {
               displaySettings: EpubDisplaySettings(
                 flow: EpubFlow.paginated,
                 snap: true,
-                theme: EpubTheme.light(),
+                theme:  _getTheme(),
                 fontSize: _fontSize.toInt(),
               ),
               onChaptersLoaded: (chapters) {
@@ -352,7 +394,8 @@ class _ReaderPageState extends State<ReaderPage> {
                 _lastSelectionCfi = selection.selectionCfi;
               },
               selectionContextMenu: _buildContextMenu(),
-            ),
+            )
+            : const SizedBox.shrink(),
       ),
     );
   }
