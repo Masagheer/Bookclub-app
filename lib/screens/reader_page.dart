@@ -14,10 +14,22 @@ import './reader_drawer.dart';
 import '../widgets/reader/theme_settings_sheet.dart';
 import '../widgets/comments/comment_sheet.dart';
 import 'package:epubx/epubx.dart';
-import 'dart:io';
-import 'dart:convert';
 import 'package:archive/archive.dart';
-import 'package:flutter_html/flutter_html.dart';
+// IMPORTANT: Import flutter_html with prefix to avoid Style conflict
+import 'package:flutter_html/flutter_html.dart' as html;
+
+/// Helper class to represent a block of text
+class TextBlock {
+  final String html;
+  final String plainText;
+  final String tag;
+
+  TextBlock({
+    required this.html,
+    required this.plainText,
+    required this.tag,
+  });
+}
 
 class ReaderPage extends StatefulWidget {
   final Book book;
@@ -29,16 +41,16 @@ class ReaderPage extends StatefulWidget {
 }
 
 class _ReaderPageState extends State<ReaderPage> {
-  List<String> chapterHtmls = [];  // Store each chapter separately
+  // Data
+  List<String> chapterHtmls = [];
+  List<String> paginatedPages = [];
+
+  // State flags
   bool isLoadingChapters = true;
   bool isPaginating = false;
 
   // Raw content before pagination
   List<String> rawChapterContents = [];
-
-  final EpubService _epubService = EpubService();
-  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>(); // ADD THIS
-  final PageController _pageController = PageController();
 
   // User-controllable settings
   double _fontSize = 18.0;
@@ -47,14 +59,20 @@ class _ReaderPageState extends State<ReaderPage> {
 
   // Page dimensions (calculated after first build)
   Size? _pageSize;
-  
+
+  // Controllers
+  final PageController _pageController = PageController();
   int _currentPage = 0;
 
+  // WebView (if needed)
   InAppWebViewController? _webViewController;
   String? _extractedPath;
   bool _isReady = false;
   bool _showControls = true;
-  
+
+  final EpubService _epubService = EpubService();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
   // Search state
   bool _isSearching = false;
   final TextEditingController _searchController = TextEditingController();
@@ -64,849 +82,257 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   void initState() {
     super.initState();
-    _initializeReader();
-    // _loadRawContent();
     _loadChapters();
   }
 
   @override
   void dispose() {
     _pageController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  // PAGINATION
-  
-
+  // ============================================================================
+  // LOAD CHAPTERS
+  // ============================================================================
   Future<void> _loadChapters() async {
     try {
       setState(() => isLoadingChapters = true);
-      
+
       final bytes = await File(widget.book.filePath).readAsBytes();
       final archive = ZipDecoder().decodeBytes(bytes);
-      
+
       List<String> allChapters = [];
-      
-      // Extract HTML files
+
       for (final file in archive) {
         if (file.isFile) {
           final nameLower = file.name.toLowerCase();
-          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && 
+          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) &&
               file.content.length > 500) {
             String content = utf8.decode(file.content);
             content = _stripXmlHeaders(content);
-            // content = _extractBodyContent(content);
-            content = _removeStylesScripts(content);
-            
-            // 🔥 SPLIT INTO SCREEN-SIZED PAGES (3000 chars each)
-            List<String> pages = _splitIntoPages(content, pageSize: 1000);
-            allChapters.addAll(pages);
+            content = _extractBodyContent(content);
+            allChapters.add(content);
           }
         }
       }
-      
+
       setState(() {
-        chapterHtmls = allChapters.take(50).toList(); // Max 50 pages
+        rawChapterContents = allChapters;
+        chapterHtmls = allChapters.take(50).toList();
         isLoadingChapters = false;
       });
-      print('✅ Loaded ${chapterHtmls.length} scrollable pages');
-      
+
+      print('✅ Loaded ${rawChapterContents.length} raw chapters');
     } catch (e) {
       print('❌ Chapter load error: $e');
       setState(() => isLoadingChapters = false);
     }
   }
 
-  // 🔥 NEW HELPER: Split long content into pages
-  List<String> _splitIntoPages(String content, {int pageSize = 3000}) {
-    List<String> pages = [];
-    
-    // Simple paragraph-aware splitting
-    List<String> paragraphs = content.split(RegExp(r'</p>\s*<p>', caseSensitive: false));
-    
-    StringBuffer currentPage = StringBuffer();
-    for (String para in paragraphs) {
-      // Add paragraph back with proper tags
-      para = para.trim();
-      if (para.isNotEmpty) {
-        para = para.replaceFirst(RegExp(r'^<p'), '<p style="margin:12px 0;line-height:1.6;">');
-        
-        if ((currentPage.length + para.length) > pageSize && currentPage.isNotEmpty) {
-          pages.add(currentPage.toString());
-          currentPage.clear();
-        }
-        currentPage.write(para);
-        currentPage.writeln('</p>');
+  // ============================================================================
+  // PAGINATION
+  // ============================================================================
+  Future<void> _paginateContent(Size size) async {
+    if (rawChapterContents.isEmpty || isPaginating) return;
+
+    if (_pageSize != null &&
+        (_pageSize!.width - size.width).abs() < 5 &&
+        (_pageSize!.height - size.height).abs() < 5 &&
+        paginatedPages.isNotEmpty) {
+      return;
+    }
+
+    setState(() => isPaginating = true);
+    _pageSize = size;
+
+    List<String> allPages = [];
+    double availableWidth = size.width - 32;
+    double availableHeight = size.height - 100;
+
+    for (String chapterHtml in rawChapterContents) {
+      List<TextBlock> blocks = _parseHtmlToBlocks(chapterHtml);
+      List<String> chapterPages =
+          await _paginateBlocks(blocks, Size(availableWidth, availableHeight));
+      allPages.addAll(chapterPages);
+    }
+
+    setState(() {
+      paginatedPages = allPages;
+      isPaginating = false;
+    });
+
+    print('✅ Created ${paginatedPages.length} paginated pages');
+  }
+
+  List<TextBlock> _parseHtmlToBlocks(String html) {
+    List<TextBlock> blocks = [];
+    final blockRegex = RegExp(
+      r'<(p|h[1-6]|div|blockquote|li)[^>]*>(.*?)</\1>',
+      caseSensitive: false,
+      dotAll: true,
+    );
+
+    for (final match in blockRegex.allMatches(html)) {
+      String tag = match.group(1)!.toLowerCase();
+      String content = match.group(2)!;
+      String plainText = content.replaceAll(RegExp(r'<[^>]*>'), '').trim();
+
+      if (plainText.isNotEmpty) {
+        blocks.add(TextBlock(
+          html: '<$tag>$content</$tag>',
+          plainText: plainText,
+          tag: tag,
+        ));
       }
     }
-    
-    if (currentPage.isNotEmpty) {
-      pages.add(currentPage.toString());
+
+    if (blocks.isEmpty && html.trim().isNotEmpty) {
+      String plainText = html.replaceAll(RegExp(r'<[^>]*>'), '').trim();
+      if (plainText.isNotEmpty) {
+        blocks.add(TextBlock(
+          html: '<p>$html</p>',
+          plainText: plainText,
+          tag: 'p',
+        ));
+      }
     }
-    
+
+    return blocks;
+  }
+
+  double _measureBlockHeight(TextBlock block, double availableWidth) {
+    final textStyle = _getTextStyleForTag(block.tag);
+    final textPainter = TextPainter(
+      text: TextSpan(text: block.plainText, style: textStyle),
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+    );
+    textPainter.layout(maxWidth: availableWidth);
+    double margins = _getMarginsForTag(block.tag);
+    return textPainter.height + margins;
+  }
+
+  TextStyle _getTextStyleForTag(String tag) {
+    if (tag.startsWith('h')) {
+      return TextStyle(
+        fontSize: _headingFontSize,
+        fontWeight: FontWeight.bold,
+        height: _lineHeight,
+      );
+    }
+    return TextStyle(
+      fontSize: _fontSize,
+      height: _lineHeight,
+    );
+  }
+
+  double _getMarginsForTag(String tag) {
+    if (tag.startsWith('h')) {
+      return 32.0;
+    }
+    return 24.0;
+  }
+
+  Future<List<String>> _paginateBlocks(
+      List<TextBlock> blocks, Size pageSize) async {
+    List<String> pages = [];
+    StringBuffer currentPageHtml = StringBuffer();
+    double currentPageHeight = 0;
+
+    for (var block in blocks) {
+      double blockHeight = _measureBlockHeight(block, pageSize.width);
+
+      if (currentPageHeight + blockHeight <= pageSize.height) {
+        currentPageHtml.writeln(block.html);
+        currentPageHeight += blockHeight;
+      } else {
+        if (currentPageHtml.isNotEmpty) {
+          pages.add(currentPageHtml.toString());
+          currentPageHtml.clear();
+          currentPageHeight = 0;
+        }
+
+        if (blockHeight > pageSize.height) {
+          currentPageHtml.writeln(block.html);
+          currentPageHeight = blockHeight;
+        } else {
+          currentPageHtml.writeln(block.html);
+          currentPageHeight = blockHeight;
+        }
+      }
+    }
+
+    if (currentPageHtml.isNotEmpty) {
+      pages.add(currentPageHtml.toString());
+    }
+
     return pages;
   }
 
-  Future<void> _initializeReader() async {
-    final readerState = context.read<ReaderState>();
-    await readerState.loadBook(widget.book);
-    
-    // Extract EPUB for rendering
-    _extractedPath = await _epubService.extractEpubForRendering(widget.book.filePath);
-    
-    setState(() {});
+  List<String> _splitIntoSentences(String text) {
+    return text
+        .split(RegExp(r'(?<=[.!?])\s+'))
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
   }
 
-  @override
-  void dispose() {
-    _searchController.dispose();
-    // Cleanup extracted files
-    if (_extractedPath != null) {
-      Directory(_extractedPath!).delete(recursive: true).catchError((_) {});
-    }
-    super.dispose();
-  }
-
-  double BodyFont = 18.0;
-  double HeadingFont = 22.0;
-
-    @override
-  Widget build(BuildContext context) {
-    return Consumer<ReaderState>(
-      builder: (context, readerState, child) {
-        // HORIZONTAL PAGING MODE (NEW)
-        if (chapterHtmls.isNotEmpty && !isLoadingChapters) {
-          return Scaffold(
-            appBar: AppBar(
-              title: Text(widget.book.title),
-              backgroundColor: Colors.blue[800],
-            ),
-            body: PageView.builder(
-              scrollDirection: Axis.horizontal,
-              itemCount: chapterHtmls.length,
-              onPageChanged: (index) {
-                print('📄 Page $index of ${chapterHtmls.length}');
-              },
-              itemBuilder: (context, index) {
-                return Container(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      // Page number
-                      Container(
-                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.7),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          'Page ${index + 1} of ${chapterHtmls.length}',
-                          style: TextStyle(color: Colors.white, fontSize: 12),
-                        ),
-                      ),
-                      SizedBox(height: 20),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          child: Html(
-                            data: chapterHtmls[index],
-                            style: {
-                              'body': Style(
-                                fontSize: FontSize(BodyFont),
-                                // fontFamily: FontFamily('serif'),
-                                lineHeight: LineHeight.number(1.6),
-                              ),
-                              'p': Style(margin: Margins.all(12)),
-                              'h1, h2': Style(
-                                fontSize: FontSize(HeadingFont),
-                                // margin: Margin?(top: 20, );
-                              ),
-                            },
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-
-          );
-        }
-
-        // FALLBACK: Your existing WebView code
-        if (readerState.isLoading || _extractedPath == null) {
-          return Scaffold(
-            backgroundColor: readerState.settings.theme.backgroundColor,
-            body: const Center(child: CircularProgressIndicator()),
-          );
-        }
-
-        return Scaffold(
-          key: _scaffoldKey,
-          backgroundColor: readerState.settings.theme.backgroundColor,
-          drawer: ReaderDrawer(
-            onChapterSelected: _navigateToChapter,
-            onHighlightSelected: _navigateToHighlight,
-            onBookmarkSelected: _navigateToBookmark,
-          ),
-          body: Stack(
-            children: [
-              // EPUB WebView
-              GestureDetector(
-                onTap: () => setState(() => _showControls = !_showControls),
-                child: _buildWebView(readerState),
-              ),
-              
-              // Top controls
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 200),
-                top: _showControls ? 0 : -100,
-                left: 0,
-                right: 0,
-                child: _buildTopBar(readerState),
-              ),
-              
-              // Bottom controls
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 200),
-                bottom: _showControls ? 0 : -100,
-                left: 0,
-                right: 0,
-                child: _buildBottomBar(readerState),
-              ),
-              
-              // Search overlay
-              if (_isSearching) _buildSearchOverlay(),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildWebView(ReaderState readerState) {
-    return FutureBuilder<String?>(
-      future: _loadBookContent(widget.book.filePath),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        
-        final content = snapshot.data ?? '<h2>No content found</h2>';
-        final fullHtml = _fixEpubHtml(content, widget.book.title);
-        
-        return InAppWebView(
-          initialData: InAppWebViewInitialData(
-            data: fullHtml,
-            // NO baseUrl = fixes FormatException
-          ),
-          initialSettings: InAppWebViewSettings(
-            javaScriptEnabled: true,
-            verticalScrollBarEnabled: true,
-            allowFileAccess: true,
-          ),
-          onWebViewCreated: (controller) {
-            _webViewController = controller;
-            _setupJavaScriptHandlers(controller);
-          },
-          onLoadStop: (controller, url) {
-            print('✅ WebView loaded content: ${content.length} chars');
-          },
-        );
-      },
-    );
-  }
-
-  // 🔥 MAIN LOADING FUNCTION
-  Future<String?> _loadBookContent(String epubPath) async {
-    try {
-      print('📖 Loading EPUB: $epubPath');
-      final bytes = await File(epubPath).readAsBytes();
-      final epub = await EpubReader.readBook(bytes);
-      
-      print('✅ Title: ${epub.Title}');
-      print('✅ epubx Chapters: ${epub.Chapters?.length ?? 0}');
-      
-      // FORCE ZIP - epubx HtmlContent is USELESS (XML headers only)
-      print('🔄 epubx too small → ZIP FORCED');
-      return await _zipDeepScan(epubPath, bytes, epub);
-      
-    } catch (e) {
-      print('❌ ERROR: $e');
-      return '<h1 style="color:red;text-align:center;padding:50px;">Error: $e</h1>';
-    }
-  }
-
-  // 🔥 ZIP CONTENT SCANNER
-  Future<String?> _zipDeepScan(String epubPath, List<int> bytes, EpubBook epub) async {
-    final archive = ZipDecoder().decodeBytes(bytes);
-    print('📦 ZIP: ${archive.length} files');
-    
-    List<MapEntry<String, ArchiveFile>> contentFiles = [];
-    
-    // Scan ALL HTML/XHTML files >500 chars
-    for (final file in archive) {
-      if (file.isFile) {
-        final nameLower = file.name.toLowerCase();
-        if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && 
-            file.content.length > 500) {
-          final preview = utf8.decode(file.content).substring(0, 200);
-          print('📄 ${file.name.padRight(50)} | ${file.content.length} chars');
-          print('   Preview: "$preview"');
-          contentFiles.add(MapEntry(file.name, file));
-        }
-      }
-    }
-    
-    print('✅ Found ${contentFiles.length} content files');
-    
-    if (contentFiles.isEmpty) {
-      return '<h1 style="color:orange;text-align:center;">No content files >500 chars found</h1>';
-    }
-    
-    // Build COMPLETE HTML
-    StringBuffer html = StringBuffer();
-    html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
-    html.writeln('<style>');
-    html.writeln('body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:#fdfdfd;color:#333;}');
-    html.writeln('h1{text-align:center;color:#2c5aa0;margin-bottom:40px;}');
-    html.writeln('h2{color:#2c5aa0;border-bottom:2px solid #eee;padding:20px 0 10px;margin-top:40px;}');
-    html.writeln('.debug{background:#e3f2fd;padding:15px;border-left:5px solid #2196f3;margin:20px 0;font-family:monospace;font-size:14px;border-radius:5px;box-shadow:0 2px 5px rgba(0,0,0,0.1);}');
-    html.writeln('.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}');
-    html.writeln('p{margin:15px 0;line-height:1.8;}');
-    html.writeln('</style></head><body>');
-    html.writeln('<h1>📖 ${epub.Title ?? "Book"}</h1>');
-    
-    for (final entry in contentFiles) {
-      final file = entry.value;
-      final fileName = entry.key;
-      try {
-        String content = utf8.decode(file.content);
-        
-        html.writeln('<div class="chapter">');
-        html.writeln('<h2>📄 ${fileName.split('/').last}</h2>');
-        
-        // DEBUG BOX
-        html.writeln('<div class="debug">');
-        html.writeln('📏 <strong>File:</strong> $fileName');
-        html.writeln('📏 <strong>Size:</strong> ${content.length} chars');
-        html.writeln('🔍 <strong>Preview:</strong> ${content.length > 100 ? content.substring(0, 100) + "..." : content}');
-        html.writeln('✅ <strong>QueerList:</strong> ${content.contains("QueerList") ? "YES ✓" : "NO"}');
-        html.writeln('</div><hr>');
-        
-        // CLEAN CONTENT
-        String cleanContent = _stripXmlHeaders(content);
-        cleanContent = _removeStylesScripts(cleanContent);
-        
-        html.writeln(cleanContent);
-        html.writeln('</div>');
-        
-      } catch (e) {
-        print('⚠️ Error processing ${file.name}: $e');
-        html.writeln('<div class="chapter"><h2>⚠️ Error: ${file.name}</h2><p style="color:red;">$e</p></div>');
-      }
-    }
-    
-    html.writeln('</body></html>');
-    print('✅ Generated HTML: ${html.length} chars');
-    return html.toString();
-  }
-
-  // 🔥 XML HEADER STRIPPER
-  String _stripXmlHeaders(String html) {
-    // Remove XML declaration + DOCTYPE
-    html = html.replaceAll(RegExp(r'<\?xml[^>]*\?>', multiLine: true), '');
-    html = html.replaceAll(RegExp(r'<!DOCTYPE[^>]*>', multiLine: true), '');
-    
-    // Extract body content safely
-    final bodyMatch = RegExp(r'<body[^>]*>(.*?)</body>', multiLine: true, caseSensitive: false).firstMatch(html);
-    if (bodyMatch != null && bodyMatch.group(1) != null) {
-      html = bodyMatch.group(1)!;
-    }
-    
-    return html.trim();
-  }
-
-    String _extractBodyContent(String html) {
-    // Remove scripts and styles
-    html = html.replaceAll(RegExp(r'<script[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
-    html = html.replaceAll(RegExp(r'<style[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
-    
-    // Extract body content
-    final bodyMatch = RegExp(r'<body[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(html);
-    if (bodyMatch != null) {
-      return bodyMatch.group(1) ?? html;
-    }
-    return html;
-  }
-
-  // 🔥 STYLE/SCRIPT REMOVER
-  String _removeStylesScripts(String html) {
-    html = html.replaceAll(RegExp(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', multiLine: true, caseSensitive: false), '');
-    html = html.replaceAll(RegExp(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', multiLine: true, caseSensitive: false), '');
-    return html;
-  }
-
-  String _buildEpubxHtml(List<EpubChapter> chapters) {
-    StringBuffer html = StringBuffer();
-    html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8">');
-    html.writeln('<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;background:white;color:#333;}.chapter{margin-bottom:60px;padding-bottom:40px;border-bottom:2px solid #eee;}h2{text-align:center;color:#2c5aa0;}.debug{background:#f0f8ff;padding:15px;border-left:4px solid #007acc;margin:20px 0;}</style></head><body>');
-    
-    html.writeln('<h1 style="text-align:center;">📖 Book Chapters</h1>');
-    
-    for (final chapter in chapters) {
-      final content = chapter.HtmlContent ?? '';
-      html.writeln('<div class="chapter">');
-      html.writeln('<h2>${chapter.Title}</h2><hr>');
-      
-      // Debug box ON EVERY CHAPTER
-      html.writeln('<div class="debug">');
-      html.writeln('Chars: ${content.length} | Preview: "${content.length > 50 ? content.substring(0, 50) : content}"');
-      html.writeln('QueerList: ${content.contains("QueerList") ? "✅ YES" : "❌ NO"}');
-      html.writeln('</div>');
-      
-      html.writeln(content);
-      html.writeln('</div>');
-    }
-    
-    html.writeln('</body></html>');
-    return html.toString();
-  }
-
-  Future<String?> _zipFallback(String epubPath, List<int> bytes) async {
-    try {
-      final archive = ZipDecoder().decodeBytes(bytes);
-      print('📦 ZIP: ${archive.length} files');
-      
-      List<ArchiveFile> contentFiles = [];
-      for (final file in archive) {
-        if (file.isFile) {
-          final nameLower = file.name.toLowerCase();
-          if ((nameLower.endsWith('.html') || nameLower.endsWith('.xhtml')) && 
-              file.content.length > 500) {
-            final preview = utf8.decode(file.content).substring(0, 100);
-            print('📄 ZIP: ${file.name} (${file.content.length} chars) | "$preview"');
-            contentFiles.add(file);
-          }
-        }
-      }
-      
-      if (contentFiles.isEmpty) {
-        print('❌ No ZIP content found');
-        return '<h1>No content files >500 chars</h1>';
-      }
-      
-      print('✅ Building ZIP HTML (${contentFiles.length} files)');
-      StringBuffer html = StringBuffer('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;}</style></head><body>');
-      
-      for (final file in contentFiles.take(5)) {
-        final content = utf8.decode(file.content);
-        html.writeln('<h2 style="color:#2c5aa0;">${file.name.split('/').last}</h2><hr>');
-        html.writeln('<div style="background:#f9f9f9;padding:15px;">${content.length} chars | QueerList: ${content.contains("QueerList") ? "✅ YES" : "NO"}</div>');
-        html.writeln(content.substring(0, 8000)); // First 8k chars
-        html.writeln('<hr style="margin:60px 0;">');
-      }
-      
-      html.writeln('</body></html>');
-      return html.toString();
-    } catch (e) {
-      print('❌ ZIP ERROR: $e');
-      return '<h1>ZIP Error: $e</h1>';
-    }
-  }
-
-  Future<String?> _extractZipContent({required Archive archive}) async {
-    try {
-      print('🔍 Scanning ${archive.files.length} ZIP files...');
-      
-      // Find HTML files with real content
-      final htmlFiles = <ArchiveFile>[];
-      for (final file in archive) {
-        if (file.isFile && file.name.toLowerCase().endsWith('.html')) {
-          final content = utf8.decode(file.content);
-          if (content.length > 2000) {  // Real chapter content
-            htmlFiles.add(file);
-            print('✅ ZIP HTML: ${file.name} (${content.length} chars)');
-            print('Preview: ${content.substring(0, 200)}...');
-          }
-        }
-      }
-      
-      if (htmlFiles.isEmpty) {
-        print('❌ No real HTML files found in ZIP');
-        return null;
-      }
-      
-      // Build HTML from ZIP files
-      StringBuffer html = StringBuffer();
-      html.writeln('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ZIP Content</title>');
-      html.writeln('<style>body{font-family:Georgia,serif;font-size:18px;line-height:1.7;max-width:900px;margin:20px auto;padding:20px;}h2{color:#2c5aa0;border-bottom:2px solid #eee;}</style></head><body>');
-      
-      for (final file in htmlFiles.take(3)) {
-        final content = utf8.decode(file.content);
-        final bodyMatch = RegExp(r'<body[^>]*>([\\s\\S]*?)</body>', dotAll: true).firstMatch(content);
-        final bodyContent = bodyMatch?.group(1) ?? content;
-        
-        html.writeln('<h2>📄 ${file.name.split('/').last}</h2><hr>');
-        html.writeln('<div class="debug">ZIP: ${content.length} chars | QueerList: ${content.contains("QueerList") ? "✅ YES" : "NO"}</div>');
-        html.writeln(bodyContent.replaceAll(RegExp(r'<script[^>]*>.*?</script>', dotAll: true), ''));
-        html.writeln('<hr style="margin: 60px 0;">');
-      }
-      
-      html.writeln('</body></html>');
-      return html.toString();
-    } catch (e) {
-      print('❌ ZIP extraction failed: $e');
-      return null;
-    }
-  }
-
-  String _cleanChapterHtml(String html) {
-    String cleaned = html;
-    
-    // 1. Remove external CSS links
-    cleaned = cleaned.replaceAllMapped(
-      RegExp(r'<link[^>]+?>', caseSensitive: false), 
-      (match) => ''
-    );
-    
-    // 2. Remove external JS  
-    cleaned = cleaned.replaceAllMapped(
-      RegExp(r'<script[^>]*>.*?</script>', dotAll: true, caseSensitive: false), 
-      (match) => ''
-    );
-
-    // 4. Fix HTML tags
-    cleaned = cleaned.replaceAllMapped(
-      RegExp(r'<html[^>]*>', caseSensitive: false), 
-      (match) => '<div'
-    );
-    cleaned = cleaned.replaceAllMapped(
-      RegExp(r'</html>', caseSensitive: false), 
-      (match) => '</div>'
-    );
-    
-    // 5. STRIP ALL HTML TAGS (fallback - gets plain text)
-    cleaned = cleaned.replaceAllMapped(
-      RegExp(r'<[^>]+?>'), 
-      (match) => ''
-    );
-    
-    return cleaned.trim().isNotEmpty ? cleaned : '<p>(Content not readable)</p>';
-  }
-
-  String _fixEpubHtml(String rawHtml, String bookTitle) {
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        * { box-sizing: border-box; }
-        body { 
-          font-family: Georgia, serif; 
-          font-size: 18px; line-height: 1.7; 
-          margin: 0; padding: 20px;
-          background: white; color: #333;
-          overflow-y: auto !important; height: 100vh;
-        }
-        .book { max-width: 900px; margin: 0 auto; }
-        .chapter { 
-          margin-bottom: 60px; padding-bottom: 40px;
-          border-bottom: 2px solid #eee; min-height: 800px;
-          page-break-after: always;
-        }
-        h1, h2 { text-align: center; color: #2c5aa0; }
-        img { max-width: 100%; height: auto; }
-        ::selection { background: #ffeb3b !important; }
-      </style>
-    </head>
-    <body>
-      <div class="book">
-        <h1 style="margin-bottom: 40px;">📖 $bookTitle</h1>
-        ${rawHtml}
-      </div>
-      <!-- JS DISABLED - fixes List<dynamic> crash -->
-    </body>
-    </html>
-    ''';
-  }
-
-  String _wrapChapterHtml(String chapterHtml, String bookTitle) {
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        body { 
-          font-family: Georgia, serif; 
-          font-size: 18px; 
-          line-height: 1.6; 
-          margin: 20px; 
-          padding: 20px;
-          max-width: 800px;
-          margin: auto;
-          background: white;
-          color: black;
-        }
-        ::selection { background: yellow; }
-      </style>
-    </head>
-    <body>
-      <h1 style="text-align: center;">📖 $bookTitle</h1>
-      <hr>
-      ${chapterHtml}
-      <script>
-        document.addEventListener('selectionchange', () => {
-          const sel = window.getSelection();
-          if (sel.toString().trim() && window.flutter_inappwebview) {
-            window.flutter_inappwebview.callHandler('onTextSelected', {
-              cfi: 'ch1:' + Math.random(),
-              text: sel.toString().trim()
-            });
-          }
-        });
-      </script>
-    </body>
-    </html>
-    ''';
-  }
-
-  String _getFallbackContent() {
-    return '''
-    <h1>📖 ${widget.book.title}</h1>
-    <p>Chapter 1 content would load here...</p>
-    <div style="height: 3000px; padding: 40px;">
-      <h2>Demo Content</h2>
-      <p>EPUB parsing failed. Select this text to test highlights.</p>
-    </div>
-    ''';
-  }
-
-
-
-
-  void _setupJavaScriptHandlers(InAppWebViewController controller) {
-    // Handle text selection
-    controller.addJavaScriptHandler(
-      handlerName: 'onTextSelected',
-      callback: (args) {
-        final data = args[0] as Map<String, dynamic>;
-        final readerState = context.read<ReaderState>();
-        readerState.setSelection(data['cfi'], data['text']);
-        _showSelectionMenu(data);
-      },
-    );
-
-    // Handle location change
-    controller.addJavaScriptHandler(
-      handlerName: 'onLocationChanged',
-      callback: (args) {
-        final data = args[0] as Map<String, dynamic>;
-        final readerState = context.read<ReaderState>();
-        readerState.updatePosition(
-          data['cfi'],
-          data['progress'].toDouble(),
-          data['currentPage'],
-          data['totalPages'],
-        );
-      },
-    );
-
-    // Handle highlight tap
-    controller.addJavaScriptHandler(
-      handlerName: 'onHighlightTapped',
-      callback: (args) {
-        final cfi = args[0] as String;
-        final readerState = context.read<ReaderState>();
-        final highlight = readerState.getHighlightByCfi(cfi);
-        if (highlight != null) {
-          _showHighlightOptions(highlight);
-        }
-      },
-    );
-
-    // Handle search results
-    controller.addJavaScriptHandler(
-      handlerName: 'onSearchResults',
-      callback: (args) {
-        setState(() {
-          _searchResults = List<Map<String, dynamic>>.from(args[0]);
-        });
-      },
-    );
-  }
-
-  Future<void> _injectReaderScript() async {
-    // This is a simplified EPUB.js-like reader script
-    // In production, you'd want to use epub.js or a similar library
-    const readerScript = '''
-      (function() {
-        // EPUB Reader JavaScript
-        // This would contain the full EPUB rendering logic
-        // For now, we'll set up the basic handlers
-        
-        document.addEventListener('selectionchange', function() {
-          const selection = window.getSelection();
-          if (selection && selection.toString().trim()) {
-            // Get CFI for selection (simplified)
-            const range = selection.getRangeAt(0);
-            const cfi = generateCFI(range);
-            window.flutter_inappwebview.callHandler('onTextSelected', {
-              cfi: cfi,
-              text: selection.toString(),
-              rect: range.getBoundingClientRect()
-            });
-          }
-        });
-        
-        function generateCFI(range) {
-          // Simplified CFI generation - in production use epub.js
-          return 'epubcfi(/6/4[chapter]!/4/2/1:' + range.startOffset + ')';
-        }
-        
-        window.applyHighlight = function(cfi, color) {
-          // Apply highlight to text at CFI location
-          console.log('Applying highlight:', cfi, color);
-        };
-        
-        window.removeHighlight = function(cfi) {
-          console.log('Removing highlight:', cfi);
-        };
-        
-        window.navigateTo = function(cfi) {
-          console.log('Navigating to:', cfi);
-        };
-        
-        window.setTheme = function(settings) {
-          document.body.style.backgroundColor = settings.backgroundColor;
-          document.body.style.color = settings.textColor;
-          document.body.style.fontFamily = settings.fontFamily;
-          document.body.style.fontSize = settings.fontSize + 'px';
-          document.body.style.lineHeight = settings.lineHeight;
-          document.body.style.textAlign = settings.textAlign;
-        };
-        
-        window.search = function(query) {
-          // Implement search logic
-          const results = [];
-          // ... search through content
-          window.flutter_inappwebview.callHandler('onSearchResults', results);
-        };
-      })();
-    ''';
-    
-    await _webViewController?.evaluateJavascript(source: readerScript);
-  }
-
-  Future<void> _applySettings(ReadingSettings settings) async {
-    final settingsJson = jsonEncode({
-      'backgroundColor': '#${settings.theme.backgroundColor.value.toRadixString(16).substring(2)}',
-      'textColor': '#${settings.theme.textColor.value.toRadixString(16).substring(2)}',
-      'fontFamily': settings.fontFamily,
-      'fontSize': settings.fontSize,
-      'lineHeight': settings.lineHeight,
-      'textAlign': settings.textAlign.name,
+  // ============================================================================
+  // FONT SIZE & SETTINGS
+  // ============================================================================
+  void _changeFontSize(int delta, BuildContext context) {
+    setState(() {
+      _fontSize = (_fontSize + delta).clamp(12, 32);
     });
-    
-    await _webViewController?.evaluateJavascript(
-      source: 'window.setTheme($settingsJson);',
-    );
-  }
-
-  Future<void> _loadHighlights(List<Highlight> highlights) async {
-    for (final highlight in highlights) {
-      await _webViewController?.evaluateJavascript(
-        source: "window.applyHighlight('${highlight.cfi}', '${highlight.color.cssColor}');",
-      );
+    if (_pageSize != null) {
+      _paginateContent(_pageSize!);
     }
   }
 
-  void _navigateToCfi(String cfi) {
-    _webViewController?.evaluateJavascript(
-      source: "window.navigateTo('$cfi');",
-    );
-  }
-
-  void _navigateToChapter(String href) {
-    _webViewController?.loadFile(assetFilePath: 'file://$_extractedPath/$href');
-  }
-
-  void _navigateToHighlight(Highlight highlight) {
-    Navigator.pop(context); // Close drawer
-    _navigateToCfi(highlight.cfi);
-  }
-
-  void _navigateToBookmark(String cfi) {
-    Navigator.pop(context); // Close drawer
-    _navigateToCfi(cfi);
-  }
-
-  void _showSelectionMenu(Map<String, dynamic> data) {
-    final rect = data['rect'] as Map<String, dynamic>;
-    
-    showMenu(
+  void _showSettingsSheet(BuildContext context) {
+    showModalBottomSheet(
       context: context,
-      position: RelativeRect.fromLTRB(
-        rect['left'],
-        rect['top'] - 50,
-        rect['right'],
-        rect['bottom'],
+      isScrollControlled: true,
+      builder: (ctx) => ThemeSettingsSheet(
+        onSettingsChanged: (settings) async {
+          final readerState =
+              Provider.of<ReaderState>(context, listen: false);
+          await readerState.updateSettings(settings);
+        },
       ),
-      items: [
-        PopupMenuItem(
-          child: const Row(
-            children: [
-              Icon(Icons.highlight, size: 20),
-              SizedBox(width: 8),
-              Text('Highlight'),
-            ],
-          ),
-          onTap: () => _showHighlightColorPicker(data['cfi'], data['text']),
-        ),
-        PopupMenuItem(
-          child: const Row(
-            children: [
-              Icon(Icons.comment, size: 20),
-              SizedBox(width: 8),
-              Text('Comment'),
-            ],
-          ),
-          onTap: () => _addHighlightWithComment(data['cfi'], data['text']),
-        ),
-        PopupMenuItem(
-          child: const Row(
-            children: [
-              Icon(Icons.copy, size: 20),
-              SizedBox(width: 8),
-              Text('Copy'),
-            ],
-          ),
-          onTap: () {
-            Clipboard.setData(ClipboardData(text: data['text']));
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Copied to clipboard')),
-            );
-          },
-        ),
-        PopupMenuItem(
-          child: const Row(
-            children: [
-              Icon(Icons.share, size: 20),
-              SizedBox(width: 8),
-              Text('Share'),
-            ],
-          ),
-          onTap: () {
-            // Implement share functionality
-          },
-        ),
-      ],
     );
   }
 
-  void _showHighlightColorPicker(String cfi, String text) {
+  // ============================================================================
+  // BOOKMARK
+  // ============================================================================
+  void _toggleBookmark(BuildContext context) async {
+    final readerState = Provider.of<ReaderState>(context, listen: false);
+    if (readerState.isCurrentPageBookmarked()) {
+      final bookmark = readerState.bookmarks.firstWhere(
+        (b) => b.cfi == readerState.currentCfi,
+      );
+      await readerState.deleteBookmark(bookmark.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Bookmark removed')),
+        );
+      }
+    } else {
+      await readerState.addBookmark();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Bookmark added')),
+        );
+      }
+    }
+  }
+
+  // ============================================================================
+  // HIGHLIGHTS
+  // ============================================================================
+  void _showHighlightColorPicker(
+      String cfi, String text, BuildContext context) {
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -927,7 +353,7 @@ class _ReaderPageState extends State<ReaderPage> {
                   return GestureDetector(
                     onTap: () {
                       Navigator.pop(ctx);
-                      _addHighlight(cfi, text, color);
+                      _addHighlight(cfi, text, color, context);
                     },
                     child: Container(
                       width: 40,
@@ -949,37 +375,35 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  Future<void> _addHighlight(String cfi, String text, HighlightColor color) async {
-    final readerState = context.read<ReaderState>();
+  Future<void> _addHighlight(
+      String cfi, String text, HighlightColor color, BuildContext context) async {
+    final readerState = Provider.of<ReaderState>(context, listen: false);
     final highlight = await readerState.addHighlight(
       cfi: cfi,
       text: text,
       color: color,
     );
-    
     await _webViewController?.evaluateJavascript(
-      source: "window.applyHighlight('${highlight.cfi}', '${highlight.color.cssColor}');",
+      source:
+          "window.applyHighlight('${highlight.cfi}', '${highlight.color.cssColor}');",
     );
-    
     readerState.clearSelection();
   }
 
-  Future<void> _addHighlightWithComment(String cfi, String text) async {
-    // First add the highlight
-    final readerState = context.read<ReaderState>();
+  Future<void> _addHighlightWithComment(
+      String cfi, String text, BuildContext context) async {
+    final readerState = Provider.of<ReaderState>(context, listen: false);
     final highlight = await readerState.addHighlight(
       cfi: cfi,
       text: text,
       color: HighlightColor.yellow,
     );
-    
     await _webViewController?.evaluateJavascript(
-      source: "window.applyHighlight('${highlight.cfi}', '${highlight.color.cssColor}');",
+      source:
+          "window.applyHighlight('${highlight.cfi}', '${highlight.color.cssColor}');",
     );
-    
     readerState.clearSelection();
-    
-    // Then show comment sheet
+
     if (mounted) {
       showModalBottomSheet(
         context: context,
@@ -989,7 +413,7 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  void _showHighlightOptions(Highlight highlight) {
+  void _showHighlightOptions(Highlight highlight, BuildContext context) {
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -1019,7 +443,7 @@ class _ReaderPageState extends State<ReaderPage> {
               title: const Text('Add/Edit Note'),
               onTap: () {
                 Navigator.pop(ctx);
-                _showNoteEditor(highlight);
+                _showNoteEditor(highlight, context);
               },
             ),
             ListTile(
@@ -1027,15 +451,18 @@ class _ReaderPageState extends State<ReaderPage> {
               title: const Text('Change Color'),
               onTap: () {
                 Navigator.pop(ctx);
-                _showHighlightColorPicker(highlight.cfi, highlight.text);
+                _showHighlightColorPicker(highlight.cfi, highlight.text, context);
               },
             ),
             ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('Delete Highlight', style: TextStyle(color: Colors.red)),
+              leading:
+                  const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Delete Highlight',
+                  style: TextStyle(color: Colors.red)),
               onTap: () async {
                 Navigator.pop(ctx);
-                final readerState = context.read<ReaderState>();
+                final readerState =
+                    Provider.of<ReaderState>(context, listen: false);
                 await readerState.deleteHighlight(highlight.id);
                 await _webViewController?.evaluateJavascript(
                   source: "window.removeHighlight('${highlight.cfi}');",
@@ -1048,9 +475,8 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  void _showNoteEditor(Highlight highlight) {
+  void _showNoteEditor(Highlight highlight, BuildContext context) {
     final controller = TextEditingController(text: highlight.note);
-    
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1070,7 +496,8 @@ class _ReaderPageState extends State<ReaderPage> {
           ),
           TextButton(
             onPressed: () {
-              final readerState = context.read<ReaderState>();
+              final readerState =
+                  Provider.of<ReaderState>(context, listen: false);
               readerState.updateHighlight(
                 highlight.copyWith(note: controller.text),
               );
@@ -1083,122 +510,144 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  Widget _buildTopBar(ReaderState readerState) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.black.withOpacity(0.7),
-            Colors.transparent,
-          ],
-        ),
-      ),
-      child: SafeArea(
-        bottom: false,
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back, color: Colors.white),
-              onPressed: () => Navigator.pop(context),
-            ),
-            IconButton(
-              icon: const Icon(Icons.menu, color: Colors.white),
-              onPressed: () => _scaffoldKey.currentState!.openDrawer(),
-            ),
-            Expanded(
-              child: Text(
-                widget.book.title,
-                style: const TextStyle(color: Colors.white),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            IconButton(
-              icon: Icon(
-                readerState.isCurrentPageBookmarked()
-                    ? Icons.bookmark
-                    : Icons.bookmark_border,
-                color: Colors.white,
-              ),
-              onPressed: _toggleBookmark,
-            ),
-            IconButton(
-              icon: const Icon(Icons.search, color: Colors.white),
-              onPressed: () => setState(() => _isSearching = true),
-            ),
-            IconButton(
-              icon: const Icon(Icons.text_format, color: Colors.white),
-              onPressed: _showSettingsSheet,
-            ),
-          ],
-        ),
-      ),
+  // ============================================================================
+  // NAVIGATION
+  // ============================================================================
+  void _navigateToCfi(String cfi) {
+    _webViewController?.evaluateJavascript(
+      source: "window.navigateTo('$cfi');",
     );
   }
 
-  Widget _buildBottomBar(ReaderState readerState) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.bottomCenter,
-          end: Alignment.topCenter,
-          colors: [
-            Colors.black.withOpacity(0.7),
-            Colors.transparent,
-          ],
-        ),
+  void _navigateToChapter(String href) {
+    _webViewController?.loadFile(
+        assetFilePath: 'file://$_extractedPath/$href');
+  }
+
+  void _navigateToHighlight(Highlight highlight, BuildContext context) {
+    Navigator.pop(context);
+    _navigateToCfi(highlight.cfi);
+  }
+
+  void _navigateToBookmark(String cfi, BuildContext context) {
+    Navigator.pop(context);
+    _navigateToCfi(cfi);
+  }
+
+  // ============================================================================
+  // SELECTION MENU
+  // ============================================================================
+  void _showSelectionMenu(
+      Map<String, dynamic> data, BuildContext context) {
+    final rect = data['rect'] as Map<String, dynamic>;
+    showMenu(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        rect['left'],
+        rect['top'] - 50,
+        rect['right'],
+        rect['bottom'],
       ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+      items: [
+        PopupMenuItem(
+          child: const Row(
             children: [
-              // Progress slider
-              SliderTheme(
-                data: SliderThemeData(
-                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-                  trackHeight: 2,
-                  activeTrackColor: Colors.white,
-                  inactiveTrackColor: Colors.white.withOpacity(0.3),
-                  thumbColor: Colors.white,
-                ),
-                child: Slider(
-                  value: readerState.progress,
-                  onChanged: (value) {
-                    // Navigate to percentage
-                  },
-                ),
-              ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Page ${readerState.currentPage} of ${readerState.totalPages}',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  Text(
-                    '${(readerState.progress * 100).toStringAsFixed(1)}%',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  if (readerState.estimatedReadingTimeLeft != null)
-                    Text(
-                      '${readerState.estimatedReadingTimeLeft} min left',
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                ],
-              ),
+              Icon(Icons.highlight, size: 20),
+              SizedBox(width: 8),
+              Text('Highlight'),
             ],
           ),
+          onTap: () =>
+              _showHighlightColorPicker(data['cfi'], data['text'], context),
         ),
-      ),
+        PopupMenuItem(
+          child: const Row(
+            children: [
+              Icon(Icons.comment, size: 20),
+              SizedBox(width: 8),
+              Text('Comment'),
+            ],
+          ),
+          onTap: () =>
+              _addHighlightWithComment(data['cfi'], data['text'], context),
+        ),
+        PopupMenuItem(
+          child: const Row(
+            children: [
+              Icon(Icons.copy, size: 20),
+              SizedBox(width: 8),
+              Text('Copy'),
+            ],
+          ),
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: data['text']));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Copied to clipboard')),
+            );
+          },
+        ),
+      ],
     );
   }
 
-  Widget _buildSearchOverlay() {
+  // ============================================================================
+  // JAVASCRIPT HANDLERS
+  // ============================================================================
+  void _setupJavaScriptHandlers(
+      InAppWebViewController controller, BuildContext context) {
+    controller.addJavaScriptHandler(
+      handlerName: 'onTextSelected',
+      callback: (args) {
+        final data = args[0] as Map<String, dynamic>;
+        final readerState =
+            Provider.of<ReaderState>(context, listen: false);
+        readerState.setSelection(data['cfi'], data['text']);
+        _showSelectionMenu(data, context);
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'onLocationChanged',
+      callback: (args) {
+        final data = args[0] as Map<String, dynamic>;
+        final readerState =
+            Provider.of<ReaderState>(context, listen: false);
+        readerState.updatePosition(
+          data['cfi'],
+          data['progress'].toDouble(),
+          data['currentPage'],
+          data['totalPages'],
+        );
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'onHighlightTapped',
+      callback: (args) {
+        final cfi = args[0] as String;
+        final readerState =
+            Provider.of<ReaderState>(context, listen: false);
+        final highlight = readerState.getHighlightByCfi(cfi);
+        if (highlight != null) {
+          _showHighlightOptions(highlight, context);
+        }
+      },
+    );
+
+    controller.addJavaScriptHandler(
+      handlerName: 'onSearchResults',
+      callback: (args) {
+        setState(() {
+          _searchResults = List<Map<String, dynamic>>.from(args[0]);
+        });
+      },
+    );
+  }
+
+  // ============================================================================
+  // SEARCH OVERLAY
+  // ============================================================================
+  Widget _buildSearchOverlay(BuildContext context) {
     return Positioned.fill(
       child: Container(
         color: Colors.black87,
@@ -1224,9 +673,9 @@ class _ReaderPageState extends State<ReaderPage> {
                         controller: _searchController,
                         autofocus: true,
                         style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
+                        decoration: const InputDecoration(
                           hintText: 'Search in book...',
-                          hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
+                          hintStyle: TextStyle(color: Colors.white54),
                           border: InputBorder.none,
                         ),
                         onSubmitted: (query) {
@@ -1252,7 +701,7 @@ class _ReaderPageState extends State<ReaderPage> {
                         ),
                         subtitle: Text(
                           result['chapter'] ?? '',
-                          style: TextStyle(color: Colors.white.withOpacity(0.7)),
+                          style: const TextStyle(color: Colors.white54),
                         ),
                         onTap: () {
                           setState(() => _isSearching = false);
@@ -1269,40 +718,173 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  void _toggleBookmark() async {
-    final readerState = context.read<ReaderState>();
-    
-    if (readerState.isCurrentPageBookmarked()) {
-      final bookmark = readerState.bookmarks.firstWhere(
-        (b) => b.cfi == readerState.currentCfi,
-      );
-      await readerState.deleteBookmark(bookmark.id);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Bookmark removed')),  // ← Fix this
-        );
-      }
-    } else {
-      await readerState.addBookmark();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Bookmark added')),   // ← And this
-        );
-      }
-    }
+  // ============================================================================
+  // UTILS
+  // ============================================================================
+  String _stripXmlHeaders(String content) {
+    content = content.replaceAll(RegExp(r'<\?xml[^>]*\?>'), '');
+    content = content.replaceAll(RegExp(r'<!DOCTYPE[^>]*>'), '');
+    return content;
   }
 
-  void _showSettingsSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => ThemeSettingsSheet(
-        onSettingsChanged: (settings) async {
-          final readerState = context.read<ReaderState>();
-          await readerState.updateSettings(settings);
-          await _applySettings(settings);
-        },
-      ),
+  String _extractBodyContent(String html) {
+    html = html.replaceAll(
+        RegExp(r'<script[^>]*>.*?</script>',
+            caseSensitive: false, dotAll: true),
+        '');
+    html = html.replaceAll(
+        RegExp(r'<style[^>]*>.*?</style>',
+            caseSensitive: false, dotAll: true),
+        '');
+    final bodyMatch = RegExp(r'<body[^>]*>(.*?)</body>',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(html);
+    return bodyMatch?.group(1) ?? html;
+  }
+
+  String _removeStylesScripts(String html) {
+    html = html.replaceAll(
+        RegExp(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>',
+            multiLine: true, caseSensitive: false),
+        '');
+    html = html.replaceAll(
+        RegExp(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>',
+            multiLine: true, caseSensitive: false),
+        '');
+    return html;
+  }
+
+  // ============================================================================
+  // BUILD
+  // ============================================================================
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<ReaderState>(
+      builder: (context, readerState, child) {
+        return Scaffold(
+          key: _scaffoldKey,
+          appBar: AppBar(
+            title: Text(widget.book.title),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.text_decrease),
+                onPressed: () => _changeFontSize(-2, context),
+              ),
+              IconButton(
+                icon: const Icon(Icons.text_increase),
+                onPressed: () => _changeFontSize(2, context),
+              ),
+              IconButton(
+                icon: const Icon(Icons.menu),
+                onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+              ),
+            ],
+          ),
+          drawer: ReaderDrawer(
+            onChapterSelected: (href) {
+              _navigateToChapter(href);
+              Navigator.pop(context);
+            },
+            onHighlightSelected: (highlight) {
+              _navigateToHighlight(highlight, context);
+            },
+            onBookmarkSelected: (cfi) {
+              _navigateToBookmark(cfi, context);
+            },
+          ),
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              final screenSize =
+                  Size(constraints.maxWidth, constraints.maxHeight);
+
+              // Trigger Pagination if needed
+              if (!isLoadingChapters &&
+                  !isPaginating &&
+                  paginatedPages.isEmpty &&
+                  rawChapterContents.isNotEmpty) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _paginateContent(screenSize);
+                });
+              }
+
+              // Loading States
+              if (isLoadingChapters || isPaginating) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              if (paginatedPages.isEmpty) {
+                return const Center(child: Text('No content available'));
+              }
+
+              // THE READER (Horizontal PageView)
+              return Stack(
+                children: [
+                  PageView.builder(
+                    controller: _pageController,
+                    scrollDirection: Axis.horizontal,
+                    itemCount: paginatedPages.length,
+                    onPageChanged: (index) {
+                      setState(() => _currentPage = index);
+                    },
+                    itemBuilder: (context, index) {
+                      return Container(
+                        width: screenSize.width,
+                        height: screenSize.height,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 20),
+                        child: html.Html(
+                          data: paginatedPages[index],
+                          style: {
+                            'body': html.Style(
+                              fontSize: html.FontSize(_fontSize),
+                              lineHeight:
+                                  html.LineHeight.number(_lineHeight),
+                              margin: html.Margins.zero,
+                              padding: html.HtmlPaddings.zero,
+                            ),
+                            'p': html.Style(
+                                margin: html.Margins.only(bottom: 12)),
+                            'h1': html.Style(
+                                fontSize:
+                                    html.FontSize(_headingFontSize + 4)),
+                            'h2': html.Style(
+                                fontSize:
+                                    html.FontSize(_headingFontSize + 2)),
+                          },
+                        ),
+                      );
+                    },
+                  ),
+
+                  // Page Indicator
+                  Positioned(
+                    bottom: 20,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          '${_currentPage + 1} / ${paginatedPages.length}',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  // Search Overlay
+                  if (_isSearching) _buildSearchOverlay(context),
+                ],
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
